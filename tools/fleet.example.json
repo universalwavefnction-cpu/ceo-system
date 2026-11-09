@@ -1,0 +1,11 @@
+{
+  "timeout": 120,
+  "ceos": [
+    {"name": "shop", "host": "laptop", "folder": "~/dev/shop"},
+    {"name": "blog", "host": "server", "folder": "~/dev/blog", "ssh": "blog.example.com",
+     "kernel": "~/ceo-kernel/ceo.py", "python": "python3"}
+  ],
+  "copies": [
+    {"ssh": "board.example.com", "folder": ".ceo/board"}
+  ]
+}

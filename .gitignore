@@ -1,0 +1,6 @@
+.ceo/
+.oneshot/
+.codegraph/
+__pycache__/
+scratch/
+STATUS.md

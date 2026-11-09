@@ -1,0 +1,6 @@
+# Test files gate.sh lets stay over 8,000 tokens, each at most the bytes here: they shrink, never grow; new tests go in new files.
+test_decide_records.py 39463
+test_door.py 95421
+test_keep_alive.py 38486
+test_night.py 57044
+test_tick.py 90374
