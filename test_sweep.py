@@ -40,7 +40,7 @@ class Floors(TickCase):
     def floors(self, text):
         # No night, as in TickCase: its key goes before any [table], where TOML keeps it at the top.
         at = text.find("\n[") + 1 or len(text)
-        (self.repo / "ceo.toml").write_text(text[:at] + 'night = ""\n' + text[at:])
+        (self.repo / "ceo.toml").write_text(text[:at] + 'night = ""\ncleaner = ""\n' + text[at:])
 
     def above(self):
         """A floor in GB above the real free space of the disk the repository is on."""
@@ -189,7 +189,7 @@ class Floors(TickCase):
                 self.assertFalse((self.repo / ".ceo").exists(), "something was created")
 
 
-class Sweep(DoorCase):
+class SweepCase(DoorCase):
     def sweep(self, *args):
         done = self.ceo("sweep", *args)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -212,6 +212,8 @@ class Sweep(DoorCase):
     def snapshot(self):
         return sorted((str(path), path.lstat().st_mtime_ns) for path in self.tmp.rglob("*"))
 
+
+class Sweep(SweepCase):
     def test_a_merged_order_is_swept_two_days_after_and_never_runs_again(self):
         self.reviewed("080-merged")
         self.assertEqual(self.door().returncode, 0)
@@ -275,6 +277,32 @@ class Sweep(DoorCase):
         for name in ("082-dirty", "083-fresh"):
             self.assertFalse((self.run_dir(name) / "review.log").exists(), name)
             self.assertFalse((self.run_dir(name) / "review.json").exists(), name)
+
+    def test_a_cut_orders_failed_commit_origin_lacks_stays_until_it_is_pushed(self):
+        slug = "908-unpublished"
+        self.commit_order(f"{slug}.md", order_text("test -f complete"))
+        run = self.ceo("run", f"orders/{slug}.md", "--worker", self.model("build"))
+        result = self.read(slug)
+        self.assertEqual((run.returncode, result["state"]), (1, "failed"), run.stdout + run.stderr)
+        head, wt, cut = result["head"], self.repo / result["worktree"], self.repo / "orders" / f"{slug}.cut"
+        self.assertEqual(self.git("show", f"{head}:built"), "built")
+        remote = lambda: self.git("--git-dir", str(self.origin), "rev-list", "--all").split()
+        self.assertNotIn(head, remote())
+        cut.touch()
+        self.commit_all("cut the failed order")
+        for path in (wt, self.run_dir(slug), cut):
+            age(path)
+        for args in (("--dry-run",), ()):
+            self.assertNotIn(slug, self.sweep(*args), args)
+            self.assertTrue(wt.is_dir() and self.run_dir(slug).is_dir(), args)
+            self.assertEqual((self.git("-C", str(wt), "rev-parse", "HEAD"), self.git("rev-parse", f"order/{slug}")), (head, head))
+        self.assertFalse((self.repo / ".ceo" / "swept" / slug).exists())
+        self.git("push", "-q", "origin", f"{head}:refs/heads/order/{slug}")
+        self.assertIn(f"would remove .ceo/wt/{slug},", self.sweep("--dry-run"))
+        self.sweep()
+        self.assertFalse(wt.exists() or self.run_dir(slug).exists())
+        self.assertEqual(self.branches(f"order/{slug}"), [])
+        self.assertIn(head, remote())
 
     def test_a_superseded_checkout_needs_a_clean_idle_head_retained_on_origin(self):
         slug = "103-round"

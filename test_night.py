@@ -1,14 +1,13 @@
 """The night end to end: a scratch project with three weaknesses planted, a flaky test, a fresh clone that
 does not build and an unhandled error, and one decoy. The tick starts the night inside its window; the
 project's own tests run in a fresh clone, then a stand-in model, in a read-only one, proposes findings
-that are each replayed in a fresh clone. Real git with a local bare repository as origin, real processes
-and files; only the model is a stand-in. Each night runs in a time zone of its own, 26 hours apart, so
+that are each replayed in a fresh clone, and each that fails goes to the bug door, asking no one. Real git
+with a local bare repository as origin, real processes and files; only the model is a stand-in. Each night runs in a time zone of its own, 26 hours apart, so
 that two nights a few seconds apart fall on two dates, as two real nights do."""
 import contextlib
 import json
 import os
 import re
-import shlex
 import signal
 import subprocess
 import sys
@@ -17,7 +16,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ceo import BOUND, held, parse_order, read_json
+from ceo import BOUND, CANNOT, findings_in, held, read_json, wait_on
 from test_bug_door import BugCase, gone
 from test_door import STUB, DoorCase
 from test_tick import CEO
@@ -52,10 +51,7 @@ FLAKY_FOUND = {"claim": "test_flaky passes or fails with the hash seed: the orde
                           "test_flaky 2>/dev/null || exit 1; done"}
 IDEA = {"idea": "Read settings from the environment, as twelve-factor apps do, so that a fresh clone builds.",
         "sources": ["https://12factor.net/config"]}
-DRAFTS = ["drafts/orders/001-night-a-fresh-clone-of-main-does-not-pass-its.md",
-          "drafts/orders/002-night-parse-crashes-with-a-traceback-on-a-line.md",
-          "drafts/orders/003-night-test-flaky-passes-or-fails-with-the-hash.md"]
-FILED = DRAFTS[1][7:]  # where the owner's agree files the second
+REPRODUCE = [f"orders/00{n - 1}-bug-{n}-reproduce.md" for n in (2, 3, 4)]  # bugs/1.md is the project's own
 
 
 class NightCase(BugCase):
@@ -123,42 +119,52 @@ class NightCase(BugCase):
                       if row["state"] == "waiting")
 
     def told(self):
-        lines = (self.repo / ".ceo" / "events.jsonl").read_text().splitlines()
+        path = self.repo / ".ceo" / "events.jsonl"  # none until something is told
+        lines = path.read_text().splitlines() if path.exists() else []
         return [one["slug"] for one in map(json.loads, lines) if one["event"] == "waiting"]
+
+    def decline(self, finding, comment):
+        """Commit finding to routines/night-declined.md, as the CEO declines one."""
+        path = self.repo / "routines" / "night-declined.md"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text((path.read_text() if path.exists() else "# Night findings declined\n")
+                        + f"\n## 2026-11-01 09:00, declined by the CEO\n\nClaim: {json.dumps(finding['claim'])}\n"
+                        f"Command: {json.dumps(finding['command'])}\nComment: {json.dumps(comment)}\n")
+        self.commit_all("A night finding declined")
+
+    def status_night(self):
+        return next(line for line in (self.repo / "STATUS.md").read_text().splitlines() if line.startswith("Night: "))
 
 
 class Night(NightCase):
-    def test_three_weaknesses_wait_as_drafts_a_decline_is_learned_and_the_next_night_repeats_nothing(self):
+    def test_three_weaknesses_go_to_the_bug_door_a_decline_is_learned_and_the_next_night_sends_nothing(self):
         date, before, brief = self.night_at(-12), self.main(), self.tmp / "brief-1"
         record = self.night(date, brief)
         self.assertEqual((record["reason"], record["tests"]), ("", {"command": "./gate.sh", "exit": 1}))
-        self.assertEqual([(one["claim"], one["new"], one["order"]) for one in record["findings"]],
-                         list(zip([GATE, CRASH["claim"], FLAKY_FOUND["claim"]], [True] * 3, DRAFTS)))
+        found = [(GATE, "./gate.sh"), tuple(CRASH.values()), tuple(FLAKY_FOUND.values())]
+        self.assertEqual([(one["claim"], one["sent"]) for one in record["findings"]],
+                         [(claim, f"bug {n} is filed, and {order} is filed and runs")
+                          for (claim, _), n, order in zip(found, (2, 3, 4), REPRODUCE)])
         self.assertEqual(record["dropped"], [{**DECOY, "exit": 0}])  # its command passes: no finding
-        # Main gained one commit, of the three findings as drafts, the morning note and the idea: nothing
-        # the project held changed, and nothing is filed in orders/.
-        self.assertEqual((self.subjects()[0], self.origin_git("rev-parse", "main~1").stdout.strip()),
-                         (f"Night {date}: 3 findings, 3 new for your word", before))
+        # Main gained a commit for each bug, its report and its reproduce order, then one of the morning note and
+        # the idea: nothing the project held changed, no draft was made, and no one was asked.
+        self.assertEqual((self.subjects()[:4], self.origin_git("rev-parse", "main~4").stdout.strip()),
+                         ([f"Night {date}: 3 findings, 3 sent to the bug door",
+                           *(f"Bug {n}: {order} filed" for n, order in zip((4, 3, 2), REPRODUCE[::-1]))], before))
         self.assertEqual(self.origin_git("diff", "--name-status", before, "main").stdout.splitlines(),
-                         ["M\tIDEAS.md", *(f"A\t{draft}" for draft in DRAFTS), f"A\troutines/night-{date}.md"])
+                         ["M\tIDEAS.md", *(f"A\tbugs/{n}.md" for n in (2, 3, 4)), *(f"A\t{order}" for order in REPRODUCE),
+                          f"A\troutines/night-{date}.md"])
         ideas = self.shown("IDEAS.md")
         self.assertRegex(ideas, r"\A# Ideas\n\n## 1 — 2026-10-01\n\nA shop on Telegram\.\n\n## 2 — [\d-]{10}\n\n"
                                 rf"From the night of {date}, not the owner's words: {re.escape(IDEA['idea'])}\n"
                                 r"Sources: https://12factor\.net/config\n\Z")
-        for order, (claim, command) in zip(DRAFTS, [(GATE, "./gate.sh"), tuple(CRASH.values()),
-                                                    tuple(FLAKY_FOUND.values())]):
-            title, done_when = parse_order(self.shown(order))[:2]
-            self.assertEqual((title, done_when), (f"Night finding: {claim.rstrip('.')}", f"{command}\n"
-                             if command == "./gate.sh" else f"bash -c {shlex.quote(command)}\n"))
-            self.assertIn(f"Claim: {json.dumps(claim)}\nCommand: {json.dumps(command)}\n", self.shown(order))
-        self.assertEqual([path for path in self.files() if path.startswith("orders/")], [])
-        # Each waits for the owner's word, told once to the ears.
-        slugs = [Path(order).stem for order in DRAFTS]
-        self.assertEqual((self.waiting(), self.told()), (slugs, slugs))
-        row = self.row(slugs[1])
-        self.assertEqual((row["question"], [one["text"] for one in row["choices"]], row["detail"]),
-                         ("Agree, decline or comment?", ["agree", "decline", "comment"],
-                          f"`{CRASH['command']}` exits 1 in a clean clone of main"))
+        for n, (claim, command) in zip((2, 3, 4), found):  # each quoted as data, as the night replayed it
+            report = self.shown(f"bugs/{n}.md")
+            self.assertRegex(report, r"\n## Reported\n\n### [\d-]+ [\d:]+, from the night\n\n    The night replayed "
+                                     r"this command with bash from the root of a fresh clean clone of main at "
+                                     rf"{record['commit'][:12]}: it exits 1\.\n")
+            self.assertEqual(findings_in(report), [{"claim": claim, "command": command}])
+        self.assertEqual((self.waiting(), self.told(), list((self.repo / ".ceo").glob("answers/*"))), ([], [], []))
         # The model was told the project, its owner, its ideas and its bugs,
         # in a copy it could not change; the copy is gone.
         given = brief.read_text()
@@ -169,68 +175,42 @@ class Night(NightCase):
         self.assertEqual(sorted(path.name for path in (self.repo / ".ceo" / "night" / date).iterdir()),
                          ["NIGHT.json", "night.log", "result.json"])
         note = self.shown(f"routines/night-{date}.md")
-        for said in (*(f"`{order}`, new" for order in DRAFTS), "proposed none of them again.",
-                     "`./gate.sh` exited 1: a finding, above.", f"{DECOY['claim']} `{DECOY['command']}`: exits 0",
-                     f"Idea 2 in IDEAS.md: {IDEA['idea']}"):
+        for said in ("nothing in this note asks you anything.",
+                     *(f"{rank}. {claim} `{command}` exits 1 in a clean clone: sent to the bug door: bug {n} is filed"
+                       for rank, ((claim, command), n) in enumerate(zip(found, (2, 3, 4)), 1)),
+                     "proposed none of them again.", "`./gate.sh` exited 1: a finding, above.",
+                     f"{DECOY['claim']} `{DECOY['command']}`: exits 0", f"Idea 2 in IDEAS.md: {IDEA['idea']}"):
             self.assertIn(said, note)
-        self.assertNotIn("started the run", self.tick())  # a draft never starts, nor is it ever eligible
-        self.assertEqual(list((self.repo / ".ceo" / "ready").glob("*.json")), [])
-        status = (self.repo / "STATUS.md").read_text().splitlines()
-        self.assertIn(f"Night: {date}, 3 findings, 3 new for your word: [routines/night-{date}.md]"
-                      f"(routines/night-{date}.md)", status)
-        self.assertIn(f"- `{DRAFTS[2]}` Night finding: {FLAKY_FOUND['claim'].rstrip('.')}: Agree, decline or "
-                      f"comment? `python3 ceo.py answer {slugs[2]} <choice> [--comment \"<text>\"]`", status)
-        self.assertEqual(status[status.index(f"- `{DRAFTS[2]}` Night finding: {FLAKY_FOUND['claim'].rstrip('.')}"
-                                             ": Agree, decline or comment? `python3 ceo.py answer "
-                                             f"{slugs[2]} <choice> [--comment \"<text>\"]`") + 1:][:3],
-                         ["  - agree", "  - decline", "  - comment"])
-        # Declined, the flaky test is learned: never proposed again. A comment waits on, for the next night.
-        # Agreed, the crash is filed: the draft moves into orders/, and it starts as any filed order.
-        said = self.ceo("answer", slugs[2], "decline", "--comment", "A set's order is no bug in a test.")
-        self.assertEqual(said.returncode, 0, said.stderr)
-        refused = self.ceo("answer", slugs[0], "comment")
-        self.assertEqual((refused.returncode, refused.stderr),
-                         (2, "ceo: refused: comment needs your words: --comment \"<text>\".\n"))
-        comment = "settings.local.json stays local: build without it."
-        self.assertEqual(self.ceo("answer", slugs[0], "comment", "--comment", comment).returncode, 0)
-        self.assertEqual(self.ceo("answer", slugs[1], "agree").returncode, 0)
-        took = self.tick("--worker", self.model("wait", str(self.tmp / "began"), str(self.release)))
-        self.assertIn(f"ceo: {DRAFTS[2]}: declined: no night proposes it again.\n", took)
-        self.assertIn(f"ceo: {DRAFTS[1]}: filed as {FILED}: it starts as a filed order.\n", took)
-        self.assertIn(f"ceo: started the run of {FILED}\n", took)
-        self.assertEqual(self.origin_git("log", "-1", "--no-renames", "--name-status", "--format=%s",
-                                         "--grep=filed on the owner", "main").stdout.splitlines(),
-                         [f"Night finding {FILED}: filed on the owner's word", "", f"D\t{DRAFTS[1]}", f"A\t{FILED}"])
-        self.assertRegex(self.shown("routines/night-declined.md"), rf"\n## [\d-]+ [\d:]+, {DRAFTS[2]}\n\nClaim: "
-                         f"{re.escape(json.dumps(FLAKY_FOUND['claim']))}\nCommand: "
-                         rf"{re.escape(json.dumps(FLAKY_FOUND['command']))}\nComment: \"A set's order is no bug "
-                         r"in a test\.\"\n\Z")
-        self.assertIn(f"Night finding {DRAFTS[2]}: declined, and its draft removed", self.subjects())
-        self.assertEqual([path for path in self.files() if Path(path).stem == slugs[2]], [])  # gone, and no cut
-        self.assertRegex(self.shown(f"{DRAFTS[0][:-3]}.comment"), rf"\A[\d-]+ [\d:]+: {re.escape(comment)}\n\Z")
-        self.assertEqual(self.waiting(), slugs[:1])
-        self.assertEqual(self.row(slugs[0])["detail"],
-                         f"`./gate.sh` exits 1 in a clean clone of main; your comment: {comment}")
-        # The next night, 26 hours east: the same weaknesses, the decline dropped before its replay, the draft
-        # and the filed order still open reported again and recorded no second time, the idea no second time.
-        date_2, before, brief = self.night_at(14), self.main(), self.tmp / "brief-2"
+        self.assertNotIn("your word", note)
+        # Filed before its push, which the next tick says.
+        self.assertEqual(self.status_night(), f"Night: {date}, 3 findings, 3 sent to the bug door: "
+                                              f"[routines/night-{date}.md](routines/night-{date}.md); not on origin yet")
+        # The CEO declines the flaky test by committing it: it is never sent again. The next night, 26 hours east,
+        # with no tick between (a tick would start the bugs' reproduce orders): the same weaknesses, the decline
+        # dropped before its replay, the two bugs still open sent no second time, the idea no second time.
+        self.decline(FLAKY_FOUND, "A set's order is no bug in a test.")
+        date_2, before, brief = self.night_at(14), self.main(), self.tmp / "brief"
         self.assertNotEqual(date_2, date)
-        record = self.night(date_2, brief)
-        self.assertEqual([(one["claim"], one["new"], one["order"]) for one in record["findings"]],
-                         [(GATE, False, DRAFTS[0]), (CRASH["claim"], False, FILED)])
+        record = self.night_now(date_2, 120)
+        self.assertEqual([(one["claim"], one["order"], "sent" in one) for one in record["findings"]],
+                         [(GATE, "bugs/2.md", False), (CRASH["claim"], "bugs/3.md", False)])
         self.assertEqual((record["declined"], record["dropped"], record["said"]),
                          ([FLAKY_FOUND], [{**DECOY, "exit": 0}], "2 findings, 2 still open"))
         self.assertEqual(self.origin_git("diff", "--name-only", before, "main").stdout.split(),
                          [f"routines/night-{date_2}.md"])
-        self.assertEqual((self.waiting(), self.told()), (slugs[:1], slugs))
+        self.assertEqual((self.waiting(), self.told()), ([], []))
         given = brief.read_text()
-        for part in (json.dumps(FLAKY_FOUND["claim"]), comment, f"{DRAFTS[0]}:\nClaim: {json.dumps(GATE)}",
-                     f"{FILED}, filed:\nClaim: {json.dumps(CRASH['claim'])}"):
+        for part in (json.dumps(FLAKY_FOUND["claim"]), "A set's order is no bug in a test.",
+                     f"bugs/2.md:\nClaim: {json.dumps(GATE)}", f"bugs/3.md:\nClaim: {json.dumps(CRASH['claim'])}"):
             self.assertIn(part, given)
         note = self.shown(f"routines/night-{date_2}.md")
-        for said in (f"1. `{DRAFTS[0]}`, still open", f"2. `{FILED}`, still open", "holds 1 declined finding; "
-                     f"tonight's model proposed 1 of them again:\n- {FLAKY_FOUND['claim']}", "None new."):
+        for said in (f"1. {GATE} `./gate.sh` exits 1 in a clean clone: still open as `bugs/2.md`.",
+                     f"2. {CRASH['claim']} `{CRASH['command']}` exits 1 in a clean clone: still open as `bugs/3.md`.",
+                     f"holds 1 declined finding; tonight's model proposed 1 of them again:\n- {FLAKY_FOUND['claim']}",
+                     "None new."):
             self.assertIn(said, note)
+        self.assertEqual(self.status_night(), f"Night: {date_2}, 2 findings, 2 still open: [routines/night-{date_2}.md]"
+                                              f"(routines/night-{date_2}.md); not on origin yet")
 
     def test_no_night_starts_outside_its_window_nor_twice_in_one_and_a_window_may_cross_midnight(self):
         self.night_at(-12, starts=60, ends=120)
@@ -246,8 +226,8 @@ class Night(NightCase):
         date = self.night_at(hours, ends=120)
         self.assertEqual(date, f"{datetime.now(timezone(timedelta(hours=hours))) + timedelta(days=1):%Y-%m-%d}")
         ran = self.ceo("night", "--model", self.model_for(self.tmp / "brief"))
-        self.assertEqual((ran.returncode, ran.stdout), (0, f"ceo: the night of {date}: 3 findings, 3 new for your "
-                                                           f"word; the morning note is routines/night-{date}.md.\n"))
+        self.assertEqual((ran.returncode, ran.stdout), (0, f"ceo: the night of {date}: 3 findings, 3 sent to the bug "
+                                                           f"door; the morning note is routines/night-{date}.md.\n"))
         again = self.ceo("night", "--model", self.model_for(self.tmp / "brief"))
         self.assertEqual((again.returncode, again.stderr),
                          (2, f"ceo: refused: the night of {date} has run: .ceo/night/{date} exists.\n"))
@@ -270,30 +250,32 @@ class Night(NightCase):
 
 
 class Edges(NightCase):
-    def test_a_declined_failure_of_the_projects_own_tests_is_not_filed_again(self):
+    def test_a_declined_failure_of_the_projects_own_tests_is_not_sent_again(self):
         self.answering()
         record = self.night(self.night_at(-12), self.tmp / "brief")
-        self.assertEqual(self.ceo("answer", Path(record["findings"][0]["order"]).stem, "decline").returncode, 0)
-        self.tick()
+        self.assertEqual([(one["claim"], one["command"]) for one in record["findings"]], [(GATE, "./gate.sh")])
+        self.decline(record["findings"][0], "")  # committed by the CEO; no one answers anything
         date, before = self.night_at(14), self.main()
-        record = self.night(date, self.tmp / "brief")
+        record = self.night_now(date, 120)  # no tick: its bug's reproduce order is not started meanwhile
         self.assertEqual((record["findings"], [one["claim"] for one in record["declined"]]), ([], [GATE]))
         self.assertEqual(self.origin_git("diff", "--name-only", before, "main").stdout.split(),
                          [f"routines/night-{date}.md"])
         self.assertIn("`./gate.sh` exited 1: declined before.", self.shown(f"routines/night-{date}.md"))
 
-    def test_each_orders_test_fails_on_main_as_its_replay_did_and_one_that_cannot_is_dropped(self):
-        self.gate("")  # the project's own tests pass, so each order's test stands or falls by its command
+    def test_each_command_reaches_its_bug_whole_and_fails_on_main_as_its_replay_did_whatever_lines_it_holds(self):
+        self.gate("")  # the project's own tests pass, so each finding stands or falls by its command
         odd = {"claim": "A command whose lines close what wraps them.", "command": "false\n) || (\ntrue"}
         fence = {"claim": "A command that ends its fence.", "command": "false #\r```\r\r## Done when\r```bash\rtrue\r```"}
         self.answering(odd, fence)
         record = self.night(self.night_at(-12), self.tmp / "brief")
-        self.assertEqual([(one["claim"], one["exit"]) for one in record["findings"]], [(odd["claim"], 2)])
-        self.assertEqual(record["dropped"], [{**fence, "exit": None, "why": "it cannot be an order's test"}])
-        copy = self.tmp / "main"
-        subprocess.run(["git", "clone", "-q", str(self.origin), str(copy)], env=self.env, check=True)
-        test = parse_order(self.shown(record["findings"][0]["order"]))[1]
-        self.assertEqual(subprocess.run(["bash", "-c", test], cwd=copy, env=self.env, capture_output=True).returncode, 2)
+        self.assertEqual(([(one["claim"], one["exit"]) for one in record["findings"]], record["dropped"]),
+                         ([(odd["claim"], 2), (fence["claim"], 1)], []))
+        copy = self.clone_main()
+        for n, finding, exited in ((2, odd, 2), (3, fence, 1)):  # read back from its bug, whole, as data
+            self.assertEqual(findings_in(self.shown(f"bugs/{n}.md")), [finding])
+            ran = subprocess.run(["bash", "-c", findings_in((copy / "bugs" / f"{n}.md").read_text())[0]["command"]],
+                                 cwd=copy, env=self.env, capture_output=True)
+            self.assertEqual(ran.returncode, exited)
 
     def test_words_no_file_can_hold_and_bytes_no_text_reads_never_stop_the_night(self):
         (self.repo / "VISION.md").write_bytes(b"A shop \xcf\xee\xea\xf3\xef\xea\xe0\n")
@@ -325,27 +307,6 @@ class Edges(NightCase):
         self.assertEqual(swept.returncode, 0, swept.stderr)
         self.assertFalse(copy.parent.exists(), swept.stdout)
 
-    def test_an_orders_test_runs_the_projects_test_command_whole_so_it_fails_on_main_as_its_replay_did(self):
-        for name in ("lint.sh", "test.sh"):
-            (self.repo / name).write_text("exit 0\n")
-        self.commit_all("tests in two steps")
-        date = self.night_at(-12)
-        with open(self.repo / "ceo.toml", "a") as conf:  # the first step ends in `;`, which `&&` binds no further
-            conf.write('test_cmd = "sh lint.sh; sh test.sh"\n')
-        missing = {"claim": "The file fixed.txt is missing.", "command": "test -f fixed.txt"}
-        self.answering(missing)
-        record = self.night(date, self.tmp / "brief")
-        self.assertEqual([(one["claim"], one["exit"]) for one in record["findings"]], [(missing["claim"], 1)])
-        test = parse_order(self.shown(record["findings"][0]["order"]))[1]
-        self.assertEqual(test, "bash -c 'test -f fixed.txt' && bash -c 'sh lint.sh; sh test.sh'\n")
-        copy = self.clone_main()
-        ran = lambda: subprocess.run(["bash", "-c", test], cwd=copy, env=self.env, capture_output=True).returncode
-        self.assertEqual(ran(), 1)  # on main: the agreed order has something to prove
-        (copy / "fixed.txt").touch()
-        self.assertEqual(ran(), 0)
-        (copy / "test.sh").write_text("exit 3\n")
-        self.assertEqual(ran(), 3)
-
     def test_tests_that_hang_get_a_quarter_of_the_night_and_are_a_finding_and_the_model_still_runs(self):
         self.gate("sleep 600")
         self.answering(CRASH)
@@ -360,9 +321,9 @@ class Edges(NightCase):
                          [(*hang, None), (CRASH["claim"], CRASH["command"], 1)])
         self.assertIn(f"`./gate.sh` ran past its {bound} s, a quarter of the night: a finding, above.",
                       self.shown(f"routines/night-{date}.md"))
-        # Its order's test is that run under that bound: on main its group is killed once the bound is reached.
-        test = parse_order(self.shown(record["findings"][0]["order"]))[1]
-        self.assertEqual(test, f"{hang[1]}\n")
+        # Its bug holds that run under that bound: on main its group is killed once the bound is reached.
+        test = findings_in(self.shown("bugs/2.md"))[0]["command"]
+        self.assertEqual(test, hang[1])
         began, proc = time.monotonic(), subprocess.Popen(["bash", "-c", test], cwd=self.clone_main(), env=self.env,
                                                          start_new_session=True)
         try:
@@ -372,12 +333,12 @@ class Edges(NightCase):
                 os.killpg(proc.pid, signal.SIGKILL)  # anything the bound left
         self.assertGreater(time.monotonic() - began, bound - 1)
 
-    def test_tests_that_ignore_signals_still_fail_their_orders_test_at_its_bound(self):
+    def test_tests_that_ignore_signals_still_fail_their_findings_command_at_its_bound(self):
         self.gate("trap '' ALRM TERM INT\nsleep 10\nexit 0")  # they would pass, ten seconds on
         self.answering()
         record = self.night_now(self.night_at(-12), 8)
         bound = record["tests"]["bound"]
-        test = parse_order(self.shown(record["findings"][0]["order"]))[1]
+        test = findings_in(self.shown("bugs/2.md"))[0]["command"]  # as its bug holds it
         began, proc = time.monotonic(), subprocess.Popen(["bash", "-c", test], cwd=self.clone_main(), env=self.env,
                                                          start_new_session=True)
         try:
@@ -417,56 +378,24 @@ class Edges(NightCase):
 
 
 class Origin(NightCase):
-    def test_answers_wait_for_origin_then_are_recorded_once(self):
-        self.answering(CRASH, {"claim": "Another failure.", "command": "false"})
-        record = self.night(self.night_at(-12), self.tmp / "brief")
-        answers, waiting = {}, {}
-        for choice, finding in zip(("comment", "agree", "decline"), record["findings"]):
-            slug = Path(finding["order"]).stem
-            sent = self.ceo("answer", slug, choice, "--comment", f"Keep my {choice}.")
-            self.assertEqual(sent.returncode, 0, sent.stderr)
-            answer = self.repo / ".ceo" / "answers" / f"{slug}.json"
-            row = self.repo / ".ceo" / "waiting" / answer.name
-            answers[answer], waiting[row] = answer.read_bytes(), row.read_bytes()
-        self.assertEqual(len(answers), 3)
-        before = self.main()
-        self.git("remote", "set-url", "origin", str(self.tmp / "away.git"))
-        for _ in range(2):
-            self.assertIn("is not saved:", self.idle_tick())
-            for path, content in {**answers, **waiting}.items():
-                self.assertTrue(path.exists(), f"the offline tick lost {path.name}")
-                self.assertEqual(path.read_bytes(), content)
-            self.assertEqual(self.git("rev-parse", "main"), before)
-        self.git("remote", "set-url", "origin", str(self.origin))
-        self.idle_tick()
-        self.assertFalse(any(path.exists() for path in answers))
-        comment, agree, decline = [finding["order"][:-3] for finding in record["findings"]]
-        self.assertIn("Keep my comment.", self.shown(f"{comment}.comment"))
-        self.assertEqual((f"{agree}.md" in self.files(), f"{agree[7:]}.md" in self.files()), (False, True))
-        self.assertIn('Comment: "Keep my decline."', self.shown("routines/night-declined.md"))
-        self.assertEqual([path for path in self.files() if path.startswith(decline)], [])
-        self.assertEqual(self.waiting(), [Path(comment).name])
-        self.assertIn("your comment: Keep my comment.", self.row(Path(comment).name)["detail"])
-        recorded = self.main()
-        self.idle_tick()
-        self.assertEqual(self.main(), recorded, "an answer was recorded twice")
-
     def test_a_night_origin_cannot_take_is_recorded_here_first_said_so_and_pushed_by_a_later_tick(self):
         self.answering(CRASH)
         date, before = self.night_at(-12), self.main()
         self.git("remote", "set-url", "origin", str(self.tmp / "away.git"))  # origin is out of reach
         record = self.night(date, self.tmp / "brief")
-        orders = [one["order"] for one in record["findings"]]
         self.assertEqual(([one["claim"] for one in record["findings"]], record["filed"], record["pushed"]),
                          ([GATE, CRASH["claim"]], True, False))
         self.assertIn("away.git", record["push"])
-        # Recorded here first: main here and the folder hold the drafts and the note, which says so; each finding
-        # waits for the owner's word; origin has nothing of it.
+        # No bug could be filed: each finding is not sent, which the note says, and a later night sends it.
+        self.assertEqual([("sent" in one, one["why"].startswith("the bug is not saved: ")) for one in record["findings"]],
+                         [(False, True)] * 2)
+        self.assertIn("in a clean clone: not sent: the bug is not saved: ", (self.repo / record["note"]).read_text())
+        # Recorded here first: main here and the folder hold the note, which says so; no one is asked anything;
+        # origin has nothing of it.
         self.assertEqual((self.main(), self.git("rev-parse", "main")), (before, record["recorded"]))
         self.assertEqual(self.git("status", "--porcelain"), "")
-        self.assertTrue(all((self.repo / order).is_file() for order in orders))
         self.assertIn("\n## Recorded here first\n", (self.repo / record["note"]).read_text())
-        self.assertEqual(self.waiting(), sorted(Path(order).stem for order in orders))
+        self.assertEqual((self.waiting(), [path for path in self.files("main") if path.startswith("bugs/2")]), ([], []))
         # Meanwhile origin's main moves on; no night starts while one is not on origin.
         other = self.tmp / "other"
         subprocess.run(["git", "clone", "-q", str(self.origin), str(other)], env=self.env, check=True)
@@ -493,17 +422,16 @@ class Origin(NightCase):
                          (True, record["recorded"], record["recorded"]))
         self.assertEqual(self.origin_git("rev-list", "--parents", "-n", "1", "main").stdout.split()[1:],
                          [moved, recorded])
-        self.assertEqual(sorted(set(self.files()) - set(self.files(before))),
-                         sorted([*orders, record["note"], "elsewhere.txt"]))
+        self.assertEqual(sorted(set(self.files()) - set(self.files(before))), sorted([record["note"], "elsewhere.txt"]))
         status = (self.repo / "STATUS.md").read_text().splitlines()
-        self.assertIn(f"Night: {date}, 2 findings, 2 new for your word: [{record['note']}]({record['note']})", status)
+        self.assertIn(f"Night: {date}, 2 findings, 2 not sent: [{record['note']}]({record['note']})", status)
         self.assertEqual([line for line in status if line.startswith(f"- `{record['note']}` needs attention: the night "
                                                                       "could not push it to origin: ")], [status[-1]])
         self.assertEqual(self.tick().count("the night of"), 0)  # pushed once, told once
 
     def test_a_night_cut_once_its_commit_is_named_is_filed_whole_by_the_next_tick_before_its_push(self):
         self.gate("")
-        self.answering(CRASH)
+        self.answering()  # no finding: no bug's record moves main here before the night's own
         date = self.night_at(-12)
         hook = self.repo / ".git" / "hooks" / "reference-transaction"  # a slow disk: main here moves slowly
         hook.write_text(f'#!/bin/sh\nin=$(cat)\nif [ "$1" = prepared ]; then\n'
@@ -515,7 +443,7 @@ class Origin(NightCase):
         self.wait_for((self.tmp / "in-move").exists, "the night was moving main here")
         record = read_json(self.repo / ".ceo" / "night" / date / "result.json")
         self.assertEqual((bool(record["recorded"]), record["filed"]), (True, False))
-        os.killpg(night.pid, signal.SIGTERM)  # cut between its commit and its waiting rows
+        os.killpg(night.pid, signal.SIGTERM)  # cut between its commit and its Night line
         night.wait(timeout=30)
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(night.pid, signal.SIGKILL)
@@ -523,26 +451,24 @@ class Origin(NightCase):
         hook.unlink()
         self.assertEqual(list((self.repo / ".git").glob("**/*.lock")), [])  # the git it waited for let go
         self.assertEqual((self.waiting(), self.git("rev-parse", "main")), ([], self.main()))
-        # The next tick files it whole, then pushes it: main here, its waiting row, told once, and its Night line.
+        # The next tick files it whole, then pushes it: main here and its Night line, and asks no one.
         self.assertIn(f"ceo: the night of {date}: pushed to origin.\n", self.tick())
         record = read_json(self.repo / ".ceo" / "night" / date / "result.json")
-        slug = Path(record["findings"][0]["order"]).stem
         self.assertEqual((record["filed"], record["pushed"], self.git("rev-parse", "main")),
                          (True, True, record["recorded"]))
-        self.assertEqual((self.main(), self.waiting(), self.told()), (record["recorded"], [slug], [slug]))
-        self.assertIn(f"Night: {date}, 1 finding, 1 new for your word: [{record['note']}]({record['note']})",
+        self.assertEqual((self.main(), self.waiting(), self.told()), (record["recorded"], [], []))
+        self.assertIn(f"Night: {date}, 0 findings: [{record['note']}]({record['note']})",
                       (self.repo / "STATUS.md").read_text().splitlines())
 
     def test_a_night_cut_once_main_here_holds_it_is_filed_by_the_next_tick_without_a_second_commit(self):
         self.gate("")
         self.answering(CRASH, ideas=[IDEA])
-        date, rows = self.night_at(-12), self.repo / ".ceo" / "waiting"
-        rows.mkdir(parents=True)
-        rows.chmod(0o555)  # no waiting row can be written: the night stops between main here and its rows
+        date, blocker = self.night_at(-12), self.repo / ".STATUS.md.tmp"
+        blocker.mkdir()  # STATUS.md cannot be written: the night stops between main here and its Night line
         try:
             self.assertNotEqual(self.ceo("night", "--model", self.model_for(self.tmp / "brief")).returncode, 0)
         finally:
-            rows.chmod(0o755)
+            blocker.rmdir()
         record = read_json(self.repo / ".ceo" / "night" / date / "result.json")
         self.assertEqual((self.git("rev-parse", "main"), record["filed"]), (record["recorded"], False))
         (self.repo / "local.txt").write_text("the owner's work, on top of the night\n")
@@ -551,7 +477,7 @@ class Origin(NightCase):
         self.assertIn(f"ceo: the night of {date}: pushed to origin.\n", self.tick())
         self.assertEqual(self.git("log", "--format=%s", "main").count(f"Night {date}:"), 1)
         self.assertIn(f"- Idea 2 in IDEAS.md: {IDEA['idea']}", (self.repo / record["note"]).read_text())
-        self.assertEqual(self.waiting(), [Path(record["findings"][0]["order"]).stem])
+        self.assertEqual((self.waiting(), [one["sent"].split(",")[0] for one in record["findings"]]), ([], ["bug 2 is filed"]))
 
     def test_a_night_cut_before_its_night_line_is_not_filed_and_the_next_tick_writes_the_line_before_its_push(self):
         self.gate("")
@@ -562,14 +488,14 @@ class Origin(NightCase):
         blocker.rmdir()
         record = read_json(self.repo / ".ceo" / "night" / date / "result.json")
         self.assertEqual((bool(record["recorded"]), record["filed"], record["pushed"]), (True, False, False))
-        self.assertEqual((len(self.waiting()), (self.repo / "STATUS.md").exists()), (1, False))
+        self.assertEqual((self.waiting(), (self.repo / "STATUS.md").exists()), ([], False))
         hook, marker = self.repo / ".git" / "hooks" / "pre-push", self.tmp / "pushed-before-its-night-line"
         hook.write_text(f'#!/bin/sh\ngrep -q "^Night: " STATUS.md || touch "{marker}"\n')
         hook.chmod(0o755)
         self.assertIn(f"ceo: the night of {date}: pushed to origin.\n", self.tick())
         record = read_json(self.repo / ".ceo" / "night" / date / "result.json")
         self.assertEqual((record["filed"], record["pushed"], marker.exists()), (True, True, False))
-        self.assertIn(f"Night: {date}, 1 finding, 1 new for your word: [{record['note']}]({record['note']})",
+        self.assertIn(f"Night: {date}, 1 finding, 1 sent to the bug door: [{record['note']}]({record['note']})",
                       (self.repo / "STATUS.md").read_text().splitlines())
 
     def test_a_night_main_here_cannot_take_says_so_once_and_is_filed_once_it_can(self):
@@ -592,7 +518,7 @@ class Origin(NightCase):
         record = read_json(self.repo / ".ceo" / "night" / date / "result.json")
         self.assertEqual((record["filed"], self.git("rev-parse", "main"), "unfiled" in record),
                          (True, self.main(), False))
-        self.assertEqual(self.waiting(), [Path(record["findings"][0]["order"]).stem])
+        self.assertEqual((self.waiting(), "bugs/2.md" in self.files()), ([], True))
 
     def test_a_night_with_origin_out_of_reach_and_never_fetched_is_recorded_on_main_here(self):
         self.gate("")
@@ -603,7 +529,8 @@ class Origin(NightCase):
         record = self.night_now(date, 20)
         self.assertEqual((record["filed"], record["pushed"], self.git("rev-parse", "main")),
                          (True, False, record["recorded"]))
-        self.assertEqual(self.waiting(), [Path(record["findings"][0]["order"]).stem])
+        self.assertEqual((self.waiting(), [one["why"] for one in record["findings"]]),
+                         ([], ["there is no main to record the bug on"]))
         self.assertIn("\n## Recorded here first\n", (self.repo / record["note"]).read_text())
         self.assertEqual(self.git("status", "--porcelain"), "")
 
@@ -617,15 +544,14 @@ class Origin(NightCase):
         local = self.git("rev-parse", "main")
         self.git("remote", "set-url", "origin", str(self.tmp / "away.git"))
         record = self.night_now(date, 20)
-        order = record["findings"][0]["order"]
-        self.assertEqual((record["filed"], record["pushed"], self.git("rev-parse", "main")),
-                         (True, False, record["recorded"]))
-        self.assertTrue(all((self.repo / path).is_file() for path in (order, record["note"], "local.txt")))
+        self.assertEqual((record["filed"], record["pushed"], self.git("rev-parse", "main"), record["said"]),
+                         (True, False, record["recorded"], "1 finding, 1 not sent"))
+        self.assertTrue(all((self.repo / path).is_file() for path in (record["note"], "local.txt")))
         self.assertEqual(self.git("status", "--porcelain"), "")
         # Origin answers again: it gets the night alone, and the owner's commit stays his, here.
         self.git("remote", "set-url", "origin", str(self.origin))
         self.assertIn(f"ceo: the night of {date}: pushed to origin.\n", self.tick())
-        self.assertEqual((order in self.files(), "local.txt" in self.files()), (True, False))
+        self.assertEqual((record["note"] in self.files(), "local.txt" in self.files()), (True, False))
         self.git("merge-base", "--is-ancestor", local, "main")  # main here still holds it
 
     def test_a_record_made_while_a_night_waits_for_origin_pushes_the_night_first(self):
@@ -772,23 +698,17 @@ class Origin(NightCase):
 
 class Waiting(NightCase):
     def test_waiting_rows_carry_their_time_and_wait_oldest_first_whatever_the_hash_seed(self):
-        self.gate("")
-        self.answering(*({"claim": f"Finding {n} is real.", "command": f"exit {n}"} for n in (1, 2, 3)))
-        record = self.night(self.night_at(-12), self.tmp / "brief")
-        slugs = [Path(one["order"]).stem for one in record["findings"]]
+        slugs = [f"00{n}-bug-{n + 1}-reproduce" for n in (1, 2, 3)]
+        (self.repo / ".ceo").mkdir(exist_ok=True)
+        for n, slug in enumerate(slugs, 2):  # as cannot() writes them, one after another
+            wait_on(self.repo, slug, {"order": f"orders/{slug}.md", "title": f"Bug {n}", "bug": n, "question": CANNOT,
+                                      "choices": [{"pick": 1, "text": "drop"}, {"pick": 2, "text": "add detail"}]})
         times = [read_json(self.repo / ".ceo" / "waiting" / f"{slug}.json")["time"] for slug in slugs]
         self.assertEqual((sorted(set(times)), len(times)), (times, 3))  # each written after the one before
         # status --json, which the ears read, lists them as written, under any hash seed.
         seen = {tuple(row["slug"] for row in json.loads(self.ceo(
             "status", "--json", env={**self.env, "PYTHONHASHSEED": str(seed)}).stdout)["rows"]) for seed in range(6)}
         self.assertEqual(seen, {tuple(slugs)})
-        # The owner files the first by hand and removes the second: the next tick drops their rows; the third waits.
-        drafts = [one["order"] for one in record["findings"]]
-        self.git("mv", drafts[0], drafts[0][7:])
-        self.git("rm", "-q", drafts[1])
-        self.commit_all("one filed and one removed by hand")
-        self.idle_tick()
-        self.assertEqual(self.waiting(), slugs[2:])
 
 
 if __name__ == "__main__":

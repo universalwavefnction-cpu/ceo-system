@@ -32,20 +32,6 @@ class Asked(TickCase):
             ceo.ring(self.repo, ceo.stall_snapshot(self.repo, ceo.ready_times(self.repo)), at)
         found = (json.loads(path.read_text()) for path in (self.repo / ".ceo" / "bells").glob("*.json"))
         return {one["key"]: one["line"] for one in found if "001-stopped" in one["line"]}
-    def test_a_question_unanswered_for_a_day_rings_again_once_a_day_and_still_waits(self):
-        row = self.ask(T)
-        self.assertEqual(self.rung(T + DAY - 60), {}, "it rang again before a day passed")
-        first = self.rung(T + DAY + 60)
-        self.assertEqual(len(first), 1, first)
-        self.assertIn("Which way?", next(iter(first.values())))
-        for later in (T + DAY + 3600, T + 2 * DAY - 60):
-            self.assertEqual(self.rung(later), first, "it rang twice in one day")
-        self.assertEqual(len(self.rung(T + 2 * DAY + 60)), 2)
-        self.assertEqual(len(self.rung(T + 3 * DAY + 60)), 3)
-        self.assertEqual(self.row.read_bytes(), row, "the bell touched the owner's question")
-        snapshot = ceo.stall_snapshot(self.repo, {"001-stopped": T})["001-stopped"]
-        self.assertTrue(snapshot["waiting"])
-        self.assertFalse(ceo.stalled(snapshot, T + 3 * DAY), "the order stopped waiting for the owner's word")
     def test_a_real_tick_rings_a_question_a_day_old_once_and_leaves_it_waiting(self):
         row = self.ask(time.time() - DAY - 600)
         for _ in range(2):

@@ -104,22 +104,26 @@ class TickCase(unittest.TestCase):
         self.git("init", "-q", "-b", "main")
         self.git("config", "maintenance.auto", "false")
         (self.repo / ".gitignore").write_text(".ceo/\n")
-        # Host space and load are not under test here: test_sweep and test_flaky cover their policies.
-        # Nor is the night, whose window would start one in any test run inside it: test_night has its own.
-        (self.repo / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nrecheck_wait = 0\nnight = ""\n')
+        # Not under test: host space, load (test_sweep, test_flaky) and night (test_night).
+        (self.repo / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nrecheck_wait = 0\nnight = ""\ncleaner = ""\n')
         (self.repo / "orders").mkdir()
-        # Every pass probes the worker's login, claude's by default: a claude of the test's own answers,
-        # so that no test reaches the one of this machine.
+        # Each pass probes claude-auto's login: stubs answer, not this machine's.
         agent = self.tmp / "agent"
         agent.mkdir()
         (agent / "claude").write_text(f"#!{sys.executable}\nimport sys\nsys.stdin.read()\n"
                                       """print('{"type": "result", "result": "ok"}')\n""")
         (agent / "claude").chmod(0o755)
+        self.claude_auto(agent)
         self.env["PATH"] = f"{agent}{os.pathsep}{self.env['PATH']}"
         self.stub = self.tmp / "stub.py"
         self.stub.write_text(STUB)
         self.release = self.tmp / "release"
         self.addCleanup(self.release.touch)  # no waiting worker outlives its test
+
+    def claude_auto(self, folder):
+        auto = folder / "claude-auto"
+        auto.write_text('#!/bin/sh\nexec "${0%/*}/claude" "$@"\n')
+        auto.chmod(0o755)
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.repo, env=self.env, check=True,
@@ -815,18 +819,9 @@ class Restart(TickCase):
         self.assertEqual(len(self.restarted()), 1)
         self.assertIsNone(proc.poll())
 
-    def test_a_projects_tick_and_a_one_shot_tick_never_restart_by_themselves(self):
+    def test_a_one_shot_tick_never_restarts_by_itself(self):
         self.commit_kernel()
-        project = self.tmp / "project"
-        self.git("clone", "-q", str(self.repo), str(project))
-        proc, output = self.start_tick(repo=project)
-        self.passes(project)
         self.new_code()
-        self.passes(project)
-        self.assertNotIn("new code in pid", output.read_text())
-        self.assertNotIn("so this tick restarts", output.read_text())
-        self.assertEqual(self.restarted(project), [])
-        self.assertIsNone(proc.poll())
         shim = self.tmp / "shim"
         shim.mkdir()
         mark = self.tmp / "shimmed"
@@ -847,8 +842,8 @@ class Restart(TickCase):
     def test_rejected_decision_code_keeps_the_startup_dispatcher_until_a_fix_restarts(self):
         decisions = self.repo / "ceo_decisions.py"
         original = decisions.read_bytes().replace(
-            b"def dispatch(repo, timeout, children):\n",
-            b'def dispatch(repo, timeout, children):\n    print("startup dispatcher ran", flush=True)\n')
+            b"def dispatch(repo, timeout, children, spell=None):\n",
+            b'def dispatch(repo, timeout, children, spell=None):\n    print("startup dispatcher ran", flush=True)\n')
         decisions.write_bytes(original)
         self.commit_kernel()
         proc, output = self.start_tick()

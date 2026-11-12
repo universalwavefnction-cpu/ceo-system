@@ -1,0 +1,56 @@
+#!/bin/bash
+# tools/box CMD ARGS...: run CMD behind a wall, in the same folder, with the same input, output and exit code.
+# Behind it CMD writes only this folder, the git folders a commit here needs and the temp folders, and cannot read
+# the GitHub and SSH credentials of the user who starts it; the network stays open. sandbox-exec builds the wall on
+# macOS, bwrap on Linux; a host with neither refuses, and CMD never runs unwalled. BOX_TOOL=none refuses anywhere.
+[ $# -gt 0 ] || { echo "usage: tools/box CMD ARGS..." >&2; exit 2; }
+NOWALL=125  # a refusal's exit code: no wall could be built here, so CMD did not run
+refuse() { echo "tools/box: $2 did not run: $1" >&2; exit $NOWALL; }
+real() {  # a path with its links resolved, as the walls compare paths; a missing file keeps its folder's
+    if [ -d "$1" ]; then (cd "$1" && pwd -P); else
+        up=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) && printf '%s/%s\n' "$up" "$(basename "$1")" || printf '%s\n' "$1"
+    fi
+}
+here=$(pwd -P) conf=${XDG_CONFIG_HOME:-$HOME/.config}
+write=("$here" /tmp)  # /var/tmp is left out: a path there is outside the wall, which the tests use
+[ -n "${TMPDIR:-}" ] && write+=("$TMPDIR")
+[ -x /usr/bin/getconf ] && temp=$(/usr/bin/getconf DARWIN_USER_TEMP_DIR 2>/dev/null) && write+=("$temp")
+# A linked worktree commits into its main repository's .git: its own folder there, the objects, the refs and their
+# logs. That repository's config, hooks and index stay outside, so nothing written here runs unwalled later.
+if dirs=$(git rev-parse --git-dir --git-common-dir 2>/dev/null </dev/null); then
+    own=${dirs%%$'\n'*} common=${dirs#*$'\n'}
+    write+=("$own")
+    [ "$(real "$own")" = "$(real "$common")" ] ||
+        write+=("$common/objects" "$common/refs" "$common/logs" "$common/packed-refs" "$common/packed-refs.lock")
+fi
+# Claude Code keeps its login in this file on Linux and must save it when it refreshes; its settings, hooks and
+# other state stay read-only, since the user's own unwalled sessions would run what a worker wrote there.
+write+=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json")
+hide=("$HOME/.ssh" "$conf/gh" "${GH_CONFIG_DIR:-$conf/gh}" "$HOME/.git-credentials" "$conf/git/credentials" "$HOME/.netrc")
+[ -n "${SSH_AUTH_SOCK:-}" ] && hide+=("$SSH_AUTH_SOCK")
+unset SSH_AUTH_SOCK GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+if [ "${BOX_TOOL:-}" != none ] && [ -x /usr/bin/sandbox-exec ]; then
+    /usr/bin/sandbox-exec -p '(version 1) (allow default)' /usr/bin/true </dev/null 2>/dev/null ||
+        refuse "sandbox-exec cannot build a wall here: run it outside any other sandbox" "$1"
+    args=() rules= n=0
+    for path in "${write[@]}"; do args+=(-D "w$n=$(real "$path")") rules+=" (subpath (param \"w$n\"))" n=$((n + 1)); done
+    profile="(version 1) (allow default) (deny file-write*) (allow file-write*$rules (literal \"/dev/null\")"
+    profile+=" (literal \"/dev/zero\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/(fd/|tty)\"))"
+    rules=
+    for path in "${hide[@]}"; do args+=(-D "h$n=$(real "$path")") rules+=" (subpath (param \"h$n\"))" n=$((n + 1)); done
+    # git's keychain helper would hand a walled push the user's GitHub login.
+    args+=(-D "k=$(git --exec-path 2>/dev/null)/git-credential-osxkeychain")
+    profile+=" (deny file-read* file-write* network-outbound$rules) (deny process-exec (literal (param \"k\")))"
+    exec /usr/bin/sandbox-exec "${args[@]}" -p "$profile" "$@"
+fi
+if [ "${BOX_TOOL:-}" != none ] && command -v bwrap >/dev/null 2>&1; then
+    why=$(bwrap --ro-bind / / --dev /dev true 2>&1 </dev/null) || refuse "bwrap cannot build a wall here: allow \
+it unprivileged user namespaces (it said: $(printf '%s' "$why" | tr -s '\n' ' '))" "$1"
+    args=(--ro-bind / / --dev /dev --die-with-parent)
+    for path in "${write[@]}"; do [ -e "$path" ] && args+=(--bind "$path" "$path"); done
+    for path in "${hide[@]}"; do
+        if [ -d "$path" ]; then args+=(--tmpfs "$path"); elif [ -e "$path" ]; then args+=(--ro-bind /dev/null "$path"); fi
+    done
+    exec bwrap "${args[@]}" --chdir "$here" -- "$@"
+fi
+refuse "this host has no wall tool: install bubblewrap (bwrap); macOS has /usr/bin/sandbox-exec" "$1"

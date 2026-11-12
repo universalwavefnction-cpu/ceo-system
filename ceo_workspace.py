@@ -1,5 +1,6 @@
 from ceo_orders import *  # Where and whether a model runs: the floors, a clean environment, worktrees, clones, checks.
-ISOLATION = {"claude": "--setting-sources project"}  # an agent CLI's flags that keep it to its folder
+# An agent CLI's flags that keep it to its folder; claude-auto is claude, whichever account it picks.
+ISOLATION = {"claude": "--setting-sources project", "claude-auto": "--setting-sources project"}
 ROUTING = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")  # the owner's own
 ROUTING += ("OPENAI_BASE_URL", "GOOGLE_GEMINI_BASE_URL")  # Codex's and Gemini's; their API keys are their login
 VENDORS = {"codex": "openai", "gemini": "google"}  # a program's vendor where vendor.<program> names none
@@ -180,14 +181,12 @@ def dry_run(repo, slug, base, script, log, timeout, survivors, lock, **bounded):
     return record
 
 def crew(repo, text, worker=None, reviewer=None):
-    """Resolve the named worker and, except for mocks, its cross-vendor reviewer."""
-    named, mocks = parse_order(text)[4:]
+    """Resolve the named worker and its cross-vendor reviewer."""
+    named = parse_order(text)[2]
     if not named:
         return worker, reviewer
     conf = settings(repo)
     worker = str(conf.get(f"workers.{named}", named))
-    if mocks:
-        return worker, None
     vendor = vendor_of(conf, worker, "the order's worker")
     reviewer = str(conf.get(f"reviewers.{named}", conf.get(f"reviewers.{vendor}", worker)))
     if vendor_of(conf, reviewer, "its reviewer") == vendor and conf.get("same_vendor_review") is not True:

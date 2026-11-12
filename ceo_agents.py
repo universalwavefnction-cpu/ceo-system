@@ -66,8 +66,7 @@ def healthy(repo, need=None):
         if why is not None:
             seen[need] = [time.time(), why]
             write_json(path, seen)
-        elif (program := login_of(need)) not in (unprobed.read_text(encoding="utf-8").splitlines()
-                                                  if unprobed.is_file() else ()):
+        elif (program := login_of(need)) not in text_of(unprobed).splitlines():
             with open(repo / ".ceo" / "tick.log", "ab") as log:  # said, then kept: a crash between says it twice
                 mark(log, f"{program} has no login probe, so a failed login shows only as its runs failing")
             with open(unprobed, "a", encoding="utf-8") as kept:
@@ -92,7 +91,6 @@ def start(repo, kind, order, args, children, busy, slug, source=None, planned=Fa
     failed login of its program or '*', while the worker an order names would share its reviewer's vendor, or while
     a run before it left its worktree or branch. Return why not, "" once started, or None: not its round, or capped."""
     model = {"run": args.worker, "review": args.reviewer or args.worker, "night": args.worker}.get(kind)
-    shares = 1  # GB of the machine's budget it draws: one for each spin a run builds at once
     if kind in ("run", "review"):  # the worker an order names, or its reviewer, is the one probed
         if not order_active(repo, slug, source, cache=cache):
             return
@@ -100,14 +98,12 @@ def start(repo, kind, order, args, children, busy, slug, source=None, planned=Fa
             text = order_bytes(repo, order, source, cache).decode("utf-8")
             if kind == "run" and (why := round_reason(repo, text)):
                 line = f"- `{order.relative_to(repo)}` not started: {why}."
-                status = repo / "STATUS.md"
-                if not status.exists() or line not in status.read_text(encoding="utf-8").splitlines():
+                if line not in text_of(repo / "STATUS.md").splitlines():
                     with open(repo / ".ceo" / "tick.log", "ab") as log:
                         mark(log, f"not started: {order.relative_to(repo)}: {why}.")
                     stamp(repo, [line])
                 return
             worker, reviewer = crew(repo, text, model, model)
-            shares = (spins := len(parse_order(text)[2]) if kind == "run" and not parse_order(text)[5] else 0) or 1
             model = reviewer if kind == "review" else worker
         except (OSError, UnicodeDecodeError, Refused) as why:
             print(f"ceo: not started: the {kind} of {order.relative_to(repo)}: {why}.", flush=True)
@@ -124,13 +120,13 @@ def start(repo, kind, order, args, children, busy, slug, source=None, planned=Fa
     if kind == "run":  # a floor's refusal, or what a run before it left, is said here, as the reason it did not start
         try:
             admit(repo, model or default_worker(repo))
-            if why := ran_before(repo, slug, spins):
+            if why := ran_before(repo, slug):
                 raise Refused(why)
         except Refused as why:
             print(f"ceo: not started: {order.relative_to(repo)}: {why}.", flush=True)
             return str(why)
     try:  # the machine's memory, decided here and handed down: a refused start spawns no child
-        share = None if kind == "door" else draw(repo, kind, slug, shares)
+        share = None if kind == "door" else draw(repo, kind, slug)
     except Refused as why:
         print(f"ceo: not started: the {kind}" + (f" of {order.relative_to(repo)}" if order else "") + f": {why}.",
               flush=True)
@@ -154,12 +150,12 @@ def start(repo, kind, order, args, children, busy, slug, source=None, planned=Fa
     return ""
 
 def logs_of(repo, kind, stem, since):
-    """(role, slug, logs) of an agent at work: a run's worker log, or one for each of its spins; a review's
+    """(role, slug, logs) of an agent at work: a run's worker log; a review's
     own; for a lock of no order, the door's, the newest log of its name written since it began, whose run
     is the order it works on."""
     runs = repo / ".ceo" / "runs"
     if kind == "run":
-        return "worker", stem, sorted((runs / stem).glob("spin-*.log")) or [runs / stem / "worker.log"]
+        return "worker", stem, [runs / stem / "worker.log"]
     if kind in ROLE:
         return ROLE[kind], stem, [runs / stem / f"{kind}.log"]
     # The night's log is in the folder of its date, of no order.
@@ -169,7 +165,7 @@ def logs_of(repo, kind, stem, since):
     return stem, logs[0].parent.name if logs and where == runs else None, logs
 
 def agents(repo):
-    """One row for each live agent of repo, the longest at work first: its role, order (and spin), when
+    """One row for each live agent of repo, the longest at work first: its role, order, when
     it began and for how long, its phase by the kernel's last mark in its log, the newest line of text
     there, its process id, and all of it as the sentence STATUS.md shows. It lives while its lock is held
     and the process the lock names, or a process group of its run, is alive; the door's is a lock of no
@@ -200,9 +196,8 @@ def agents(repo):
         for log in logs or [None]:
             mark, line = told(log, since) if log else ("", "")
             phase = next((phase for words, phase in PHASES if mark.startswith(words)), "setup")
-            spin = int(log.stem[5:]) if log and log.stem.startswith("spin-") else None
-            head = who + (f" spin {spin}" if spin else "") + f", {lasted(elapsed)}, {phase}"
-            rows.append({"role": role, "order": order, "slug": slug, "spin": spin, "started": started,
+            head = who + f", {lasted(elapsed)}, {phase}"
+            rows.append({"role": role, "order": order, "slug": slug, "started": started,
                          "elapsed": elapsed, "phase": phase, "line": line, "pid": pid,
                          "sentence": head + (f": {line}" if line else "")})
     return sorted(rows, key=lambda row: -row["elapsed"])

@@ -50,10 +50,10 @@ class Return(TickCase):
                                              "question": ceo.CANNOT, "choices": [{"pick": 1, "text": "drop"},
                                                                                  {"pick": 2, "text": "add detail"}]})
         for n in range(33, 57):  # as many rows as wait in the kernel today, and more events than fit
-            ceo.wait_on(self.repo, f"{n:03}-night", {"order": f"drafts/orders/{n:03}-night.md", "title": f"Night {n}",
-                                                     "question": "Agree, decline or comment?", "night": "2026-10-24",
-                                                     "choices": ceo.NIGHT_CHOICES})
-            ceo.event(self.repo, "waiting", f"{n:03}-night", f"Night {n}: agree, decline or comment.")
+            ceo.wait_on(self.repo, f"{n:03}-stopped", {"order": f"orders/{n:03}-stopped.md", "title": f"Stopped {n}",
+                                                       "question": "How should this stop proceed?", "decision": f"d{n}",
+                                                       "choices": ceo.DECIDE_CHOICES})
+            ceo.event(self.repo, "waiting", f"{n:03}-stopped", f"Stopped {n}: how should this stop proceed?")
         ceo.event(self.repo, "waiting", "032-asked", "Asked: cannot reproduce: drop, or add detail.")
         self.idle_tick()
         screen = self.screen()

@@ -9,6 +9,8 @@ from unittest.mock import patch
 from ceo_review import SPLIT_IT, oversized, wrote_lessons
 from test_tick import TickCase
 
+LOCK = '[[package]]\nname = "crate"\nversion = "1.0.0"\n\n'  # four lines a package, as cargo writes them
+
 
 class ReviewSize(TickCase):
     def test_root_and_nested_test_and_spec_files_do_not_count_toward_the_limit(self):
@@ -78,6 +80,45 @@ class ReviewSize(TickCase):
                          ("blocked", "it changes LESSONS.md, which only the kernel writes; a lesson goes in the "
                                      "final answer; adds 302 lines: split it", None))  # no reviewer started
         self.assertTrue(review["reason"].endswith(SPLIT_IT))  # so no round follows a size refusal
+
+    def test_a_cargo_lock_at_the_top_or_nested_counts_nothing_and_its_manifest_still_counts(self):
+        self.commit_order("001-crate.md")
+        raw = (self.repo / "orders" / "001-crate.md").read_bytes()
+        self.git("checkout", "-qb", "work")
+        for name in ("Cargo.lock", "app/src-tauri/Cargo.lock"):
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(LOCK * 1100)
+        (self.repo / "app" / "src-tauri" / "Cargo.toml").write_text("[package]\n" * 150)
+        (self.repo / "app" / "src-tauri" / "main.rs").write_text("fn main() {}\n" * 150)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "8,800 lines of two Cargo.lock files and 300 lines of code")
+        head = lambda: {"commit": self.git("rev-parse", "HEAD")}
+        with patch.dict(os.environ, self.env):
+            self.assertEqual(oversized(head(), raw, self.repo), "")
+            (self.repo / "app" / "src-tauri" / "Cargo.toml").write_text("[package]\n" * 151)
+            self.git("commit", "-qam", "one more line of its manifest")
+            self.assertEqual(oversized(head(), raw, self.repo), "adds 301 lines: split it")
+            # Only a file named Cargo.lock is the lockfile: a name that merely holds it is code, and counts.
+            self.git("checkout", "-q", "HEAD~1")
+            (self.repo / "app" / "src-tauri" / "Cargo.lock.rs").write_text("fn lock() {}\n")
+            self.git("add", "-A")
+            self.git("commit", "-qm", "a file named after the lockfile")
+            self.assertEqual(oversized(head(), raw, self.repo), "adds 301 lines: split it")
+
+    def test_a_first_run_whose_cargo_lock_is_thousands_of_lines_is_reviewed_and_not_refused_for_its_size(self):
+        self.commit_order("002-app.md")
+        worker = self.tmp / "worker.py"
+        worker.write_text("import subprocess, sys\nsys.stdin.buffer.read()\nopen('built', 'w').write('built\\n')\n"
+                          f"open('Cargo.lock', 'w').write({LOCK!r} * 1100)\n"
+                          "open('Cargo.toml', 'w').write('[package]\\n' * 299)\n"
+                          "subprocess.run(['git', 'add', '-A'], check=True)\n"
+                          "subprocess.run(['git', 'commit', '-qm', 'build'], check=True)\n")
+        run = self.ceo("run", "orders/002-app.md", "--worker", shlex.join([sys.executable, str(worker)]))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.ceo("review", "orders/002-app.md", "--reviewer", self.model("clean"))
+        review = self.read("002-app", "review.json")
+        self.assertEqual((review["verdict"], review["reason"]), ("survives", ""), review)  # a reviewer read it
 
 
 if __name__ == "__main__":

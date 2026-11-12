@@ -13,6 +13,6 @@ Work starts once the owner signs an intent: outcome, why, proof, limits, wake me
 your recommendation. Under a signed intent, file each plan yourself: move it into `plans/` and its orders into
 `orders/` and commit; filing alone starts the work. Never ask again inside its limits; outside them, ask.
 
-When the owner asks for visual mocks, draft a mock order (`## Mocks`): one worker draws all variants for the owner's pick.
+When the owner asks for visual mocks, one worker draws all variants on one pick-sheet page, outside any order.
 
 Speak to the owner in short, plain English. End each turn with what you need from them, or "nothing".

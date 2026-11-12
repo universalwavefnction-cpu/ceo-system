@@ -38,7 +38,7 @@ def open_project(project):
 
 def session(again=False):
     """Open one live CEO per project with SESSION.md; direct Claude continues only with this folder's history,
-    Codex resumes its last session here, and Gemini, with no flag to take SESSION.md, opens without it."""
+    Codex resumes its last session here, and Gemini, with no system-prompt flag, opens new with it as its first message."""
     repo, lock = toplevel(), None
     try:
         command = shlex.split(settings(repo).get("session", "claude"))
@@ -49,14 +49,11 @@ def session(again=False):
             config = claude_home() / "projects"
             again = any(path.is_file() for path in (config / re.sub(r"[^a-zA-Z0-9]", "-", str(repo))).glob("*.jsonl"))
         source = repo / "SESSION.md" if (repo / "SESSION.md").exists() else KERNEL.parent / "SESSION.md"
-        prompt, program = source.read_text(encoding="utf-8"), Path(command[0]).name
+        prompt, program = source.read_text(encoding="utf-8") + shelf().decode(), Path(command[0]).name
         # Codex has no system-prompt flag; -c reads its value as TOML, and a JSON string is a TOML string.
         given = "developer_instructions=" + json.dumps(prompt, ensure_ascii=False)
-        flags = {"codex": [*["resume", "--last"] * again, "-c", given], "gemini": []}.get(
+        flags = {"codex": [*["resume", "--last"] * again, "-c", given], "gemini": ["-i", prompt]}.get(
             program, [*["--continue"] * again, "--append-system-prompt", prompt])
-        if program == "gemini":
-            print("ceo: gemini has no flag to take SESSION.md, so this session opens new and without it",
-                  file=sys.stderr, flush=True)
         return subprocess.run([*command, *flags], cwd=repo, pass_fds=(lock,)).returncode  # held even if the wrapper dies
     except (OSError, UnicodeDecodeError) as err: raise Refused(f"the session cannot start: {err}") from None
     except (AttributeError, TypeError, ValueError) as err: raise Refused(f"session is not a valid command: {err}") from None
@@ -159,14 +156,14 @@ def init(path):
             ignore.write_bytes(old)
         raise Refused(why)
     register(repo)
+    if not (remote := origin(repo)) or remote[0] == remote[1]: print(f"ceo: {no_github(remote)}.", flush=True)
     kernel, here = f"python3 {shlex.quote(str(KERNEL))}", shlex.quote(str(repo))
     print(f"ceo: {repo} has its CEO: {', '.join(written)} committed. Next:\n1. Write VISION.md: "
           "what this project is for, what done looks like, what it must never do; commit it and, with an "
           "origin, push it: every worker starts from origin's main.\n2. Write the first order, as "
           "orders/README.md says, a draft in drafts/orders/001-<name>.md, and file it: move it into orders/ "
           f"and commit.\n3. Start the tick: cd {here} && {kernel} tick --every 60; then {kernel} keep, "
-          "there, keeps it alive.\nceo: Claude Code keeps its transcripts 30 days; to keep them 90, for this project's "
-          f'memory, add "cleanupPeriodDays": 90 to {claude_home() / "settings.json"}: the kernel never sets it.', flush=True)
+          "there, keeps it alive.", flush=True)
     # A file every worker reads, written for another agent system: said, never in the way, for rewriting
     # it is the owner's.
     found = [(name, word.lower()) for name in ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md")

@@ -1,9 +1,10 @@
 from ceo_init import *  # Orders and plans as the kernel reads them: parsed, snapshotted, in families; which may start.
 SECTIONS = ("Goal", "Done when", "Not asked")
 FILED = re.compile(r"orders/[0-9]+-[a-z0-9-]+\.md")  # an order; any other file in orders/ never starts
+PICKS_LEFT = "mocks and spins left the kernel: the owner's picks run on a pick-sheet page outside it"
 
 def parse_order(text):
-    """Return title, test, variants, preview, worker and whether these are mocks; refuse bad orders."""
+    """Return title, test and worker; refuse bad orders."""
     sections, current, fenced, title = {}, None, False, ""
     for line in text.splitlines():
         # A '#' line inside a code fence is example text or a shell comment, not a heading.
@@ -18,6 +19,8 @@ def parse_order(text):
             sections[current].append(line)
     if not title:
         raise Refused("the order has no '# Title' line")
+    if "Mocks" in sections or "Spins" in sections:
+        raise Refused(PICKS_LEFT)
     for name in SECTIONS:
         if not "\n".join(sections.get(name, [])).strip():
             raise Refused(f"the order's '## {name}' section is missing or empty")
@@ -32,24 +35,11 @@ def parse_order(text):
     if "Worker" in sections and len(worker) != 1:
         raise Refused("the '## Worker' section must hold one line, a name under [workers] or a command")
     worker = worker[0] if worker else ""
-    mocks = "Mocks" in sections
-    if mocks and "Spins" in sections:
-        raise Refused("an order cannot have both '## Mocks' and '## Spins'")
-    if not mocks and "Spins" not in sections:
-        return title, blocks[0], [], "", worker, False
-    kind, minimum = ("Mocks", 1) if mocks else ("Spins", 2)
-    spins = [re.sub(r"^([-*+]|\d+[.)])\s+", "", line.strip())
-             for line in sections[kind] if line.strip()]
-    paths = [Path(line.strip().strip("`")) for line in sections.get("Preview", []) if line.strip()]
-    if not minimum <= len(spins) <= 6:
-        raise Refused(f"the '## {kind}' section must hold {minimum} to 6 lines, one for each variant")
-    if (len(paths) != 1 or paths[0].is_absolute() or ".." in paths[0].parts
-            or paths[0].suffix.lower() not in (".html", ".png")):
-        raise Refused("the '## Preview' section must name one .html or .png path inside the worktree")
-    return title, blocks[0], spins, str(paths[0]), worker, mocks
+    return title, blocks[0], worker
 
-def parse_plan(text):
-    """Read landing order and dependencies; omitted concurrency means one order at a time."""
+def parse_plan(text, afters=None):
+    """Read landing order and dependencies; omitted concurrency means one order at a time. Given afters, each filed
+    plan's numbers and what they wait for, an after may name another plan's order, and no cycle may cross plans."""
     title, limit, orders = "", None, []
     for line in text.splitlines():
         if line.startswith("# ") and not title:
@@ -72,19 +62,18 @@ def parse_plan(text):
     if not title or not orders:
         raise Refused("a plan needs a '# Title' line and at least one order")
     pending = {one["number"]: set(one["after"]) for one in orders}
-    for after in pending.values():
-        if missing := after - pending.keys():
-            raise Refused(f"after {min(missing)} names an order outside the plan")
-    visited = set()
-    while pending:
-        ready = {number for number, after in pending.items() if after <= visited}
-        if not ready:
-            raise Refused("the plan's after lines make a cycle")
-        visited.update(ready)
-        pending = {number: after for number, after in pending.items() if number not in ready}
+    outside = set().union(*pending.values()) - pending.keys()  # a plan naming only its own lines is read alone
+    graph = {**pending, **{n: afters[n] | pending.get(n, set()) for n in afters}} if afters and outside else pending
+    if afters is not None and (missing := outside - graph.keys()):
+        raise Refused(f"after {min(missing)} names an order no filed plan lists")
+    reach = {number: graph[number] for number in pending}  # an own order, on through what any plan says it waits for
+    for _ in graph:
+        reach = {number: after.union(*(graph.get(n, ()) for n in after)) for number, after in reach.items()}
+    if any(number in after for number, after in reach.items()):
+        raise Refused("the plan's after lines make a cycle")
     earlier = set()
     for one in orders:
-        if not set(one["after"]) <= earlier:
+        if not set(one["after"]) & pending.keys() <= earlier:
             raise Refused("after must name earlier lines of the plan")
         earlier.add(one["number"])
     return dict(title=title, limit=limit or 1, orders=orders)
@@ -131,7 +120,7 @@ def order_snapshot(repo, source=None, cache=None):
         round_ = re.search(r"^ROUND: ([0-9]+)\s*$", header, re.M)
         result = read_json(ceo / "runs" / slug / "result.json") or read_json(ceo / "swept" / slug)
         review = read_json(ceo / "runs" / slug / "review.json")
-        picked = bool(result.get("mocks") and result.get("picked"))
+        picked = bool(result.get("mocks") and result.get("picked"))  # a mock the owner picked, from before mocks left
         orders[path] = dict(replaces=replaces[1] if replaces else "", round=int(round_[1]) if round_ else 1,
                             revises=revises[1] if revises else "", text=text,
                             cut=str(Path(path).with_suffix(".cut")) in files or file.with_suffix(".cut").exists(),
@@ -246,20 +235,23 @@ def plan_snapshot(repo, source=None, cache=None):
                                                              for ref in ("refs/heads/main", "refs/remotes/origin/main"))),
                             started=run_recorded(repo, slug), waiting=(ceo / "waiting" / f"{slug}.json").exists(),
                             filed=filed.get(path) or (0 if source else (repo / path).stat().st_mtime))
-    plans, members = {}, set()
+    # A plan that cannot be read still holds the orders it lists, and what they wait for: none of them starts alone.
+    listing = re.compile(r"^- (orders/([0-9]{3})-[a-z0-9-]+\.md)(?: after ([0-9]{3}(?:, *[0-9]{3})*))?", re.M)
+    lines = listing.findall("\n".join(texts.values()))
+    members, plans = sorted({path for path, _, _ in lines}), {}
+    afters = {n: set(re.findall("[0-9]{3}", " ".join(a for _, m, a in lines if m == n))) for _, n, _ in lines}
     for path, text in texts.items():
-        # A plan that cannot be read still holds the orders it lists: none of them starts alone.
-        members.update(re.findall(r"^- (orders/[0-9]{3}-[a-z0-9-]+\.md)", text, re.M))
         try:
-            plans[path] = parse_plan(text)
+            plans[path] = parse_plan(text, afters)
         except Refused as why:
-            plans[path] = dict(title=Path(path).stem, orders=[], limit=1, error=str(why))
-    return dict(plans=plans, orders=orders, members=sorted(members))
+            plans[path] = dict(title=Path(path).stem, orders=[], limit=1, error=str(why),
+                               listed=[one[0] for one in listing.findall(text)])
+    return dict(plans=plans, orders=orders, members=members)
 
 def decide_plans(snapshot):
     """Select starts in landing order and show states from a restartable, file-derived snapshot; alone, the latest
     round of each filed family no plan lists, oldest filed first; capped, rounds over round_cap, which hold no slot
-    and start() says why once; invalid, orders alone that cannot be read."""
+    and start() says why once; invalid, orders alone or in a plan, due or not, that cannot be read."""
     orders, plans = snapshot["orders"], snapshot["plans"]
     families = order_families(orders)
     merged, cut, phases, started = {}, {}, {}, {}
@@ -271,15 +263,19 @@ def decide_plans(snapshot):
         phases[path] = "" if family["complete"] else next((orders[p]["phase"] for p in sorted(
             family["members"]) if orders[p]["phase"]), "")
         started[path] = family["finished"] or orders[latest]["started"]
-    states, candidates, owners, used, targets = {}, [], {}, {}, {}
+    states, candidates, unreadable, owners, used, targets = {}, [], [], {}, {}, {}
     for name, plan in plans.items():
         rows = plan["orders"]
+        for path in plan.get("listed", ()):  # an unreadable plan owns what it lists, and offers none
+            owners.setdefault(families[path]["latest"] if path in families else path, []).append(name)
         used[name] = sum(bool(phases.get(one["path"])) for one in rows)
         ancestors = {}
         for one in rows:
             number, path = one["number"], one["path"]
-            ancestors[number] = set(one["after"]).union(*(ancestors[n] for n in one["after"]))
-            before = [row for row in rows if row["number"] in ancestors[number]]
+            ancestors[number] = set(one["after"]).union(*(ancestors.get(n, ()) for n in one["after"]))
+            # An order of another plan: every path a filed plan lists under its number, read or not.
+            before = [row for row in rows if row["number"] in ancestors[number]] + [dict(number=p[7:10], path=p) for p in
+                      snapshot["members"] if p[7:10] in ancestors[number] and all(p[7:10] != r["number"] for r in rows)]
             blocked = next((row["number"] for row in before if cut.get(row["path"])), "")
             waiting = next((row["number"] for row in before if not merged.get(row["path"])), "")
             own = orders.get(path, {})
@@ -289,9 +285,9 @@ def decide_plans(snapshot):
                                   "blocked by cut " + blocked if blocked else "not in orders/" if path not in orders
                                   else "waiting for " + waiting if waiting else ""))
             owners.setdefault(target, []).append(name)
-            if (not (cut.get(path) or blocked or waiting or started.get(path) or phases.get(path))
-                    and orders.get(target, {}).get("valid") and not orders[target].get("waiting")):
-                candidates.append((name, target))
+            if (not (cut.get(path) or started.get(path) or phases.get(path)) and target in orders  # says why, due or not
+                    and not orders[target].get("waiting") and not (orders[target]["valid"] and (blocked or waiting))):
+                (candidates if orders[target]["valid"] else unreadable).append((name, target))
     starts = []
     for name, path in candidates:
         belonging = owners[path]
@@ -312,7 +308,8 @@ def decide_plans(snapshot):
     alone = sorted((path for path, family in families.items() if path == family["latest"] and path not in members
                     and not (started[path] or phases[path] or orders[path]["cut"] or orders[path].get("waiting"))),
                    key=lambda path: (orders[path].get("filed", 0), path))
-    invalid = [path for path in alone if not orders[path].get("valid")]  # never eligible: it says why instead
+    invalid = list(dict.fromkeys([*(path for _, path in unreadable),  # never eligible, due in a plan or alone: it says why
+                                  *(path for path in alone if not orders[path].get("valid"))]))
     capped = [path for path in dict.fromkeys([*(path for _, path in candidates), *alone])
               if orders[path].get("capped") and path not in invalid]
     return dict(start=starts, alone=[path for path in alone if path not in capped + invalid], capped=capped,
@@ -369,17 +366,16 @@ def round_reason(repo, text):
         raise Refused("round_cap in ceo.toml must be a positive integer")
     return f"ROUND: {found[1]} exceeds round_cap {cap}" if found and int(found[1]) > cap else ""
 
-def ran_before(repo, slug, spins=0):
-    """Why a run of slug with its spins cannot begin, a worktree, record or branch of a run before it being there,
-    or an empty string: none is, or its worker met an api error and it runs again in its worktree."""
-    ceo, names = repo / ".ceo", [f"{slug}-spin-{n}" for n in range(1, spins + 1)] or [slug]
+def ran_before(repo, slug):
+    """Why a run of slug cannot begin, a worktree, record or branch of a run before it being there, or an empty
+    string: none is, or its worker met an api error and it runs again in its worktree."""
+    ceo = repo / ".ceo"
     if read_json(ceo / "runs" / slug / "result.json").get("state") == "retry":
         return ""
-    for path in dict.fromkeys((ceo / "wt" / slug, ceo / "runs" / slug, *(ceo / "wt" / name for name in names))):
+    for path in (ceo / "wt" / slug, ceo / "runs" / slug):
         if path.exists() and (path != ceo / "runs" / slug or run_recorded(repo, slug)):
             return f"this order has run before: {path.relative_to(repo)} exists"
-    return next((f"this order has run before: its branch order/{name} exists" for name in dict.fromkeys((slug, *names))
-                 if rev(repo, f"refs/heads/order/{name}")), "")
+    return f"this order has run before: its branch order/{slug} exists" if rev(repo, f"refs/heads/order/{slug}") else ""
 
 def at_work(repo):
     """(kind, slug, lock) of each run and review at work: its record is still to make, and

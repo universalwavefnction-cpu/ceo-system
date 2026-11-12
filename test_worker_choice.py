@@ -2,6 +2,7 @@
 start the command its '## Worker' names, and its review goes to the reviewer ceo.toml maps that worker's
 vendor to. Each model is a stub that prints a marker naming itself, so each log shows who ran."""
 import json
+import os
 import shlex
 import sys
 import unittest
@@ -25,6 +26,18 @@ else:
     subprocess.run(["git", "add", "built"], check=True)
     subprocess.run(["git", "commit", "-qm", f"built by {name}"], check=True)
 '''
+# A claude and a claude-auto: each keeps its name and arguments in KEPT and answers the login probe, or,
+# while FAILS, with the api error of a spent account; set by the lines ahead of it.
+CLI = r'''
+import json, os, sys
+sys.stdin.read()
+with open(KEPT, "a") as out:
+    out.write(json.dumps([os.path.basename(sys.argv[0]), *sys.argv[1:]]) + "\n")
+print(json.dumps({"type": "result", "is_error": FAILS, "result": "weekly limit" if FAILS else "ok",
+                  "terminal_reason": "api_error" if FAILS else "completed"}))
+sys.exit(FAILS)
+'''
+FLAGS = "-p --permission-mode bypassPermissions --output-format stream-json --verbose"
 SAME = ("the order's worker and its reviewer are both of the vendor {0}: map {0} to another vendor's "
         "reviewer under [reviewers] in ceo.toml, or set same_vendor_review = true")
 
@@ -46,7 +59,7 @@ class WorkerChoice(TickCase):
         """ceo.toml with no floor of the machine's: astra and opus are anthropic's, codex is openai's and
         plain, named for no vendor, claude's; anthropic's work is reviewed by the stub named anthropic."""
         (self.repo / "ceo.toml").write_text("\n".join([
-            "disk_floor_gb = 0", "ram_floor_gb = 0", 'night = ""', *lines,
+            "disk_floor_gb = 0", "ram_floor_gb = 0", 'night = ""', 'cleaner = ""', *lines,
             "[workers]", f'astra = "{self.cmd("astra", "--drive")}"', f'opus = "{self.cmd("opus")}"',
             "[vendor]", 'astra = "anthropic"', 'opus = "anthropic"', 'codex = "openai"',
             "[reviewers]", f'anthropic = "{self.cmd(anthropic, "--review")}"',
@@ -144,7 +157,7 @@ class WorkerChoice(TickCase):
 
     def toml(self, *lines):
         """ceo.toml with no floor of the machine's and no [vendor] line: codex and gemini are vendors by name."""
-        (self.repo / "ceo.toml").write_text("\n".join(["disk_floor_gb = 0", "ram_floor_gb = 0", 'night = ""',
+        (self.repo / "ceo.toml").write_text("\n".join(["disk_floor_gb = 0", "ram_floor_gb = 0", 'night = ""', 'cleaner = ""',
                                                        *lines]) + "\n")
 
     def test_ceo_tomls_worker_is_the_default_worker_and_reviewer_and_without_a_worker_section_no_vendor_check(self):
@@ -166,7 +179,50 @@ class WorkerChoice(TickCase):
         self.assertEqual(ceo.default_worker(self.repo), ceo.default_worker())
         run = self.ceo("run", "orders/051-unread.md")
         self.assertEqual((run.returncode, run.stderr),
-                         (2, "ceo: refused: ceo.toml cannot be read at line 4: worker = codex exec.\n"))
+                         (2, "ceo: refused: ceo.toml cannot be read at line 5: worker = codex exec.\n"))
+
+    def programs(self, folder, *names, kept=None, fails=()):
+        """In folder, an executable for each name: a fake claude or claude-auto that fails the probe if named in fails."""
+        folder.mkdir()
+        for name in names:
+            (folder / name).write_text(f"#!{sys.executable}\nKEPT = {str(kept)!r}\nFAILS = {name in fails}\n{CLI}")
+            (folder / name).chmod(0o755)
+
+    def test_the_default_worker_is_claude_auto_on_path_else_claude_else_none_and_ceo_toml_wins(self):
+        self.toml()
+        for names, want in ((("claude", "claude-auto"), "claude-auto"), (("claude",), "claude"),
+                            (("claude-auto",), "claude-auto"), ((), None)):
+            with self.subTest(names=names):
+                folder = self.tmp / f"path-{'-'.join(names) or 'empty'}"
+                self.programs(folder, *names)
+                with mock.patch.dict(os.environ, {"PATH": str(folder)}):
+                    for repo in (self.repo, None):
+                        self.assertEqual(ceo.default_worker(repo), want and f"{want} {FLAGS}")
+        both = self.tmp / "path-claude-claude-auto"
+        (both / "claude-auto").chmod(0o644)  # a wrapper that cannot run is not on PATH
+        with mock.patch.dict(os.environ, {"PATH": str(both)}):
+            self.assertEqual(ceo.default_worker(self.repo), f"claude {FLAGS}")
+            (both / "claude-auto").chmod(0o755)
+            self.toml('worker = "mine -p"')  # the owner's own line beats both
+            self.assertEqual(ceo.default_worker(self.repo), "mine -p")
+            self.assertEqual(ceo.default_worker(), f"claude-auto {FLAGS}")
+
+    def test_the_default_worker_claude_auto_is_probed_and_isolated_as_claude_is_though_claude_would_fail(self):
+        self.toml()  # no isolation.claude-auto line: its probe and its flags are the kernel's own
+        kept = self.tmp / "kept.jsonl"
+        folder = self.tmp / "account-a-spent"
+        self.programs(folder, "claude", "claude-auto", kept=kept, fails=("claude",))
+        (self.repo / ".ceo").mkdir()
+        with mock.patch.dict(os.environ, {"PATH": f"{folder}{os.pathsep}{os.environ['PATH']}"}):
+            default = ceo.default_worker(self.repo)
+            self.assertTrue(ceo.healthy(self.repo, default))
+        isolated = ["--setting-sources", "project"]
+        self.assertEqual(ceo.clean(self.repo, default)[0], [*shlex.split(default), *isolated])
+        self.assertEqual(ceo.isolation(self.repo, "claude-auto"), ceo.isolation(self.repo, "claude"))
+        self.assertEqual([json.loads(line) for line in kept.read_text().splitlines()],
+                         [["claude-auto", *FLAGS.split(), *isolated]])  # one probe, never the plain claude
+        login = json.loads((self.repo / ".ceo" / "login.json").read_text())
+        self.assertEqual({model: why for model, (_, why) in login.items()}, {default: ""})
 
     def test_codex_is_openais_and_gemini_googles_so_one_reviews_the_other_and_the_quota_follows(self):
         self.named("050-codex", "cx")

@@ -12,7 +12,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from ceo import ENDING, ROUTING, default_worker, healthy, held
+from ceo import ENDING, ROUTING, healthy, held
 from test_ceo import order_text
 from test_door import STUB, DoorCase
 from test_tick import CEO
@@ -89,6 +89,7 @@ class KeepAliveCase(DoorCase):
         for name in ("claude", "othercli"):
             (fake / name).write_text(f"#!{sys.executable}\n{FAKE_CLAUDE}")
             (fake / name).chmod(0o755)
+        self.claude_auto(fake)
         self.kept = self.tmp / "kept.jsonl"
         self.env.update(PATH=f"{fake}{os.pathsep}{self.env['PATH']}", FAKE_CLAUDE_KEPT=str(self.kept))
 
@@ -376,19 +377,18 @@ class Login(KeepAliveCase):
         auto.chmod(0o755)
         with open(self.repo / "ceo.toml", "a") as conf:
             conf.write("same_vendor_review = true\n[workers]\nauto = \"claude-auto -p\"\n"
-                       f"[reviewers]\nclaude = {json.dumps(self.model('clean'))}\n"
-                       "[isolation]\nclaude-auto = \"--setting-sources project\"\n")
+                       f"[reviewers]\nclaude = {json.dumps(self.model('clean'))}\n")
         self.commit_all("workers")
         self.file_named("203-auto", "auto")
         self.kept.with_name("kept.jsonl.down").write_text(API_ERROR, encoding="utf-8")
-        said = self.tick()
+        said = self.tick("--worker", "claude -p")  # the default is claude-auto now
         self.assertIn("LOGIN FAILED", said)
         self.assertIn("ceo: started the run of orders/203-auto.md\n", said)
         self.wait_for(lambda: self.ended("203-auto", "run", lambda r: r["state"] == "done"),
                       "the second CLI built while claude's login failed")
         login = json.loads((self.repo / ".ceo" / "login.json").read_text())
         self.assertEqual({model: why for model, (_, why) in login.items()},
-                         {default_worker(): LIMIT, "claude-auto -p": ""})
+                         {"claude -p": LIMIT, "claude-auto -p": ""})
         self.assertTrue(all(time.time() - when < 600 for when, _ in login.values()))
         self.assertEqual([call["stdin"].encode() for call in self.given()], [PROBE])
         calls = [json.loads(line) for line in self.kept.with_name("kept.jsonl.b").read_text().splitlines()]

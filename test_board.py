@@ -52,7 +52,7 @@ def fleet():
         row("049-x", "in progress", detail="a fresh reviewer checks it"),
         row("050-x", "waiting", question="Round 3 against a cap of 3?", choices=[]),
         row("051-x", "needs attention", detail="the door cannot merge it: it conflicts with main"),
-        row("060-night-y", "waiting", question="Agree, decline or comment?", choices=[]),
+        row("060-x", "waiting", question="How should this proceed?", choices=[]),  # a CEO's stop
         row("030-x", "needs attention", detail="an order of no plan")])
     blog = status("blog", "Mac", [order("101", merged=True), order("102", merged=True)], [])
     kernel = status("kernel", "vps", [], [row("130-bug-15-reproduce", "waiting", question="Cannot reproduce?")],
@@ -108,6 +108,10 @@ def rendered(files, at=AT):
 
 
 class StatusFile(TickCase):
+    def setUp(self):
+        super().setUp()
+        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
+
     def file_plans(self, plans):
         """Each plan filed in a commit of its own, at its day of October 2026."""
         (self.repo / "plans").mkdir(exist_ok=True)
@@ -118,7 +122,6 @@ class StatusFile(TickCase):
                            env={**self.env, "GIT_COMMITTER_DATE": f"2026-10-{day}T08:00:00+00:00"})
 
     def test_the_status_file_holds_status_json_the_last_tick_and_the_wave_by_family(self):
-        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         rounds = {"001-old": "", "002-new": "", "002-new-round-2": "ROUND: 2\nREPLACES: orders/002-new.md\n",
                   "003-next": ""}
         for slug, header in rounds.items():
@@ -160,9 +163,10 @@ class StatusFile(TickCase):
         self.assertEqual(found["wave"]["orders"], [
             dict(number="002", order="orders/002-new.md", latest="002-new-round-2", round=2,
                  title="The 002-new-round-2 order", merged=False, cut=False, stalled=False, picked=False,
-                 stage="queued"),
+                 stage="queued", plan="plans/new.md", merged_at=None),
             dict(number="003", order="orders/003-next.md", latest="003-next", round=1, title="The 003-next order",
-                 merged=False, cut=False, stalled=False, picked=False, stage="queued")])
+                 merged=False, cut=False, stalled=False, picked=False, stage="queued", plan="plans/new.md",
+                 merged_at=None)])
         self.assertEqual(found["unreadable"], [])
         rows = {one["slug"]: one["state"] for one in found["status"]["rows"]}
         self.assertEqual((rows["002-new-round-2"], rows["002-new"]), ("waiting", "needs attention"))
@@ -177,7 +181,6 @@ class StatusFile(TickCase):
         self.assertEqual([one["stalled"] for one in json.loads(out.read_text())["wave"]["orders"]], [False, True])
 
     def test_one_order_family_listed_by_two_plans_counts_once(self):
-        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         for slug, header in {"001-first": "", "001-round-2": "ROUND: 2\nREPLACES: orders/001-first.md\n"}.items():
             (self.repo / "orders" / f"{slug}.md").write_text(f"# The {slug} order\n{header}"
                                                              + order_text("test -f built", title=""))
@@ -200,7 +203,7 @@ class StatusFile(TickCase):
         self.assertEqual(found["wave"]["orders"], [
             dict(number="001", order="orders/001-round-2.md", latest="001-round-2", round=2,
                  title="The 001-round-2 order", merged=False, cut=False, stalled=False, picked=False,
-                 stage="queued")])
+                 stage="queued", plan="plans/new.md", merged_at=None)])
         at = datetime.now(timezone.utc)
         for view in board.views([found], at):
             self.assertEqual((view["counts"]["orders"], view["counts"]["need-you"]), (1, 1), view["name"])
@@ -212,7 +215,6 @@ class StatusFile(TickCase):
             self.assertEqual((view["counts"]["orders"], view["counts"]["need-you"]), ({"1"}, {"1"}), name)
 
     def test_a_cut_order_whose_record_names_a_merge_off_main_is_neither_merged_nor_cut_and_shows_its_stage(self):
-        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         self.commit_order("001-built.md", "# The 001-built order\n" + order_text("test -f built", title=""))
         (self.repo / "plans").mkdir()
         (self.repo / "plans" / "wave.md").write_text("# The wave\n- orders/001-built.md — Built.\n")
@@ -233,7 +235,6 @@ class StatusFile(TickCase):
         self.assertEqual((one["merged"], one["cut"], one["picked"], one["stage"]), (False, False, False, "done"))
 
     def test_each_order_names_its_stage_building_in_review_while_its_agent_lives_else_queued_or_its_record(self):
-        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         slugs = ("001-built", "002-reviewed", "003-broken")
         for slug in slugs:
             (self.repo / "orders" / f"{slug}.md").write_text(f"# The {slug} order\n" + order_text("test -f built",
@@ -272,7 +273,6 @@ class StatusFile(TickCase):
                                     "003-broken": ("queued", False, False)})
 
     def test_the_status_file_carries_the_memory_over_what_loads_as_status_json_lists_it(self):
-        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         self.git("add", "-A")
         self.git("commit", "-qm", "start")
         (self.repo / "LESSONS.md").write_text("- a lesson\n" * 201)
@@ -299,7 +299,7 @@ class Views(unittest.TestCase):
             "parked": [("048", "its test does not pass"), ("051", "the door cannot merge it: it conflicts with main")],
             "merged": [("040", "Order 040"), ("041", "Order 041")],
             "question": [("046", "Passed its done-when. Refile?"), ("050", "Round 3 against a cap of 3?"),
-                         ("060", "Agree, decline or comment?")]})
+                         ("060", "How should this proceed?")]})
         self.assertEqual([one["round"] for one in shop["need-you"]], [3, 2])
         # All's lists are its CEOs' joined in the files' order; every view has the same chips.
         whole = found[0]["lists"]

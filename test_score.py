@@ -10,8 +10,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import ceo_score
-from tools import scorecard
+from tools import score, scorecard
 
 KERNEL = Path(__file__).resolve().parent
 ROWS = ("merges", "changed lines", "order files", "round files", "cut files", "bugs filed", "bugs closed",
@@ -82,7 +81,7 @@ class ScoreCase(unittest.TestCase):
 
 class Table(ScoreCase):
     def test_the_rows_are_fixed_and_printed_in_their_order(self):
-        self.assertEqual(ceo_score.ROWS + scorecard.ROWS, ROWS)
+        self.assertEqual(score.ROWS + scorecard.ROWS, ROWS)
         repo = self.repo()
         self.commit(repo, "2026-10-18T10:00:00Z", "One (#1)")
         done = self.score(*WEEK, str(repo))

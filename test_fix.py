@@ -2,6 +2,7 @@
 runs, reviews and git; only the models are stubs."""
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,16 @@ FINDINGS = [{"claim": "No file named a.", "command": "test -f a", "exit": 1, "co
             {"claim": "Fine.", "command": "ls >/dev/null", "exit": 0, "counts": False},
             {"claim": "No file\n  named b.", "command": "test -f b", "exit": 1, "counts": True}]
 
+WORD = "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430"  # eight Cyrillic letters, spelled as escapes in this source
+NODE = "import sys\nsys.stdout.write(ascii((sys.argv[1:], sys.stdin.read())) + '\\n')\n"
+COMMANDS = (  # the letters in a heredoc program, in inline program words and in plain shell words
+    f"node --input-type=module <<'JS'\nconst word = '{WORD}';\nif (!/{WORD}/.test(`{WORD}`)) throw Error(word);\nJS",
+    f"python3 - <<'PY'\nword = '{WORD}'\nprint(ascii(word), len(word))\nPY",
+    f"node -e 'console.log(\"{WORD}\")' && node -p \"'{WORD}'\"",
+    f"python3 -c 'print(ascii(\"{WORD}\"))' && python3 -c \"print(ascii('{WORD}'))\"",
+    f"grep -qF '{WORD}' word.txt && printf '%s\\n' \"{WORD}\" {WORD}",
+)
+
 
 def order_text(title, head="", worker=""):
     return (f"# {title}\n{head}\n## Goal\nBuild it.\n{worker}\n## Done when\n{FENCE}bash\ntest -f built\n{FENCE}\n\n"
@@ -81,7 +92,7 @@ class FixCase(unittest.TestCase):
         self.repo = repo
         self.git("init", "-q", "-b", "main")
         (repo / ".gitignore").write_text(".ceo/\nSTATUS.md\n")
-        (repo / "ceo.toml").write_text(f'disk_floor_gb = 0\nram_floor_gb = 0\nrecheck_wait = 0\nnight = ""\n{config}')
+        (repo / "ceo.toml").write_text(f'disk_floor_gb = 0\nram_floor_gb = 0\nrecheck_wait = 0\nnight = ""\ncleaner = ""\n{config}')
         return repo
 
     def git(self, *args, repo=None):
@@ -117,18 +128,27 @@ class Cases(FixCase):
         ceo.fix_moves(self.repo)
         return sorted(self.git("diff", "--name-only", base, "main").split())
 
+    def round_of(self, slug, head, commands):
+        """The text of the one round fix_moves() files for a failed review of slug at head finding these commands."""
+        self.records(slug, head, review={"findings": [
+            {"claim": f"Claim {i}.", "command": command, "exit": 1, "counts": True}
+            for i, command in enumerate(commands, 1)]})
+        filed = self.filed(head)
+        self.assertEqual(len(filed), 1, filed)
+        return self.git("show", f"main:{filed[0]}") + "\n"
+
     def test_a_fresh_failed_review_files_its_round_once(self):
         self.order("002-two", "Two", worker="\n## Worker\nopus\n")
         head = self.commit()
         self.records("002-two", head)
         self.assertEqual(self.filed(head), ["orders/002-round-2.md"])
         text = self.git("show", "main:orders/002-round-2.md") + "\n"
-        title, block, _, _, worker, _ = ceo.parse_order(text)
+        title, block, worker = ceo.parse_order(text)
         self.assertEqual((title, worker), ("Two: round 2, its review's findings fixed", "opus"))
         self.assertIn("\nORDER: 002\nROUND: 2\nREPLACES: orders/002-two.md\n", text.split("\n## ", 1)[0])
         self.assertEqual(block, f"git merge-base --is-ancestor {head} HEAD || {{ echo \"the run's head {head} is "
-                                "not merged into this head\"; exit 1; }\n(\ntest -f a\n) || { echo \"finding 1 of the "
-                                "review still holds\"; exit 1; }\n(\ntest -f b\n) || { echo \"finding 2 of the review "
+                                "not merged into this head\"; exit 1; }\nbash -c 'test -f a' || { echo \"finding 1 of the "
+                                "review still holds\"; exit 1; }\nbash -c 'test -f b' || { echo \"finding 2 of the review "
                                 "still holds\"; exit 1; }\ntest -f built\n")
         self.assertIn(":\n- No file named a.: `test -f a`\n- No file named b.: `test -f b`\n\nDo this", text)
         self.assertIn(f"1. Run `git merge --no-edit {head}`.", text)
@@ -149,7 +169,7 @@ class Cases(FixCase):
         self.records("008-eight", head)  # run by hand: no plan start of it is recorded
         self.assertEqual(self.filed(head), ["orders/008-round-2.md"])
         text = self.git("show", "main:orders/008-round-2.md") + "\n"
-        self.assertEqual(ceo.parse_order(text)[4], "", "an order without a worker gives its round none")
+        self.assertEqual(ceo.parse_order(text)[2], "", "an order without a worker gives its round none")
         self.assertNotIn("## Worker", text)
 
     def test_nothing_is_filed_for_a_review_the_kernel_does_not_own(self):
@@ -158,7 +178,6 @@ class Cases(FixCase):
                  "a review of another commit": ({}, {"commit": "0" * 40}),
                  "a run that failed": ({"state": "failed"}, {}),
                  "a merged run": ({"merged": "1" * 40}, {}),
-                 "mocks": ({"mocks": True}, {}),
                  "a CEO merge": ({"ceo_merge": {"decision": "d"}}, {}),
                  "a review that ended before FIX_SINCE": ({}, {"ended": before}),
                  "a review with no end": ({}, {"ended": None}),
@@ -212,147 +231,54 @@ class Cases(FixCase):
         self.assertIsNone(ceo.fixing(self.repo, found, review, row)(base))
         self.assertEqual(self.filed(base), [])
 
-    def test_a_round_uses_ascii_escapes_only_in_program_string_literals(self):
-        word, citation, high = "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0444\u0430\u0439\u043b", "\u00ab\u041d\u0435\u0432\u0430\u00bb", "\U0001f642"
-        ascii_word = r"\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0444\u0430\u0439\u043b"
-        # Each pair is an ordinary program literal to rewrite, inline or in a heredoc; single lines must survive byte for byte.
-        lines = ["set -e", f"grep -qF '{word}' file", f'printf "%s" "{word}"', f"printf $'{word}'",
-                 (f"node -e 'console.log(\"{word}\")'", f"node -e 'console.log(\"{ascii_word}\")'"),
-                 (f'python3 -c "print(\'{word}\')"', f'python3 -c "print(\'{ascii_word}\')"'),
-                 "cat > expected.txt <<'EOF'", "node <<'DATA'", f"'{word}'", "DATA", "EOF",
-                 "cat <<'A' <<'B'", "A", "node <<'DATA'", f"'{word}'", "DATA", "B",
-                 "cat <<'END HERE'", "node <<'DATA'", f"'{word}'", "DATA", "END HERE",
-                 "cat <<'END;HERE'", "node <<'DATA'", f"'{word}'", "DATA", "END;HERE",
-                 "python3 script.py <<'DATA'", f"'{word}'", "DATA",
-                 "node <<'DATA' script.js", f"'{word}'", "DATA", "python3 - <<'PY' # a program",
-                 (f"m = '{word}'", f"m = '{ascii_word}'"),
-                 (f'assert m == "{word}"', f'assert m == "{ascii_word}"'),
-                 (f"m = '''{word}\n{word}'''", f"m = '''{ascii_word}\n{ascii_word}'''"),
-                 (f"m = '{word} {citation} {high}'", f"m = '{ascii_word} {citation} {high}'"),
-                 f"raw = r'{word}'", f"formatted = f'{{len(\"{word}\")}}'", f"raw = rb'{word}'", f"raw = b'{word}'",
-                 "m = '\\\u041f'", f"# '{word}'", "PY", f"echo '{word}'",
-                 "LC_ALL=en_US.UTF-8 node --input-type=module <<'NODE'",
-                 (f"const error = {{message: '{word}'}};", f"const error = {{message: '{ascii_word}'}};"),
-                 (f'assert.equal(error.message, "{word}");', f'assert.equal(error.message, "{ascii_word}");'),
-                 (f"const page = `{word}\n{word}`;", f"const page = `{ascii_word}\n{ascii_word}`;"),
-                 (f"function message() {{ return `{word}`; }}", f"function message() {{ return `{ascii_word}`; }}"),
-                 f"console.log(String.raw`{word}`, tag `{word}`, factory()`{word}`);",
-                 f"console.log(String.raw /* comment */ `{word}`, tag // comment\n`{word}`);",
-                 f"console.log(obj.return`{word}`, obj.await`{word}`);",
-                 f"console.log(String.raw`a${{`!`}}{word}`);",
-                 (f"const nested = `{word}${{ /* {word} */ {{x: '{word}'}}.x }}{word}`;",
-                  f"const nested = `{ascii_word}${{ /* {word} */ {{x: '{ascii_word}'}}.x }}{ascii_word}`;"),
-                 f"const regex = /'{word}'/; const quote = /'/;",
-                 f"if (true) /'{word}'/.test('{citation}');",
-                 (f"console.log(`${{1 / 1}}{word}/`);", f"console.log(`${{1 / 1}}{ascii_word}/`);"),
-                 f"console.log(String.raw`'{word}'`);",
-                 (f"console.log(4 / '{word}'.length / 2);", f"console.log(4 / '{ascii_word}'.length / 2);"),
-                 (f"console.log('{word}');", f"console.log('{ascii_word}');"),
-                 f"// '{word}'", f"/* `{word}` */", "NODE", f"echo '{word}'",
-                 'python3 - <<-"TABS"', (f"\tprint('{word}')", f"\tprint('{ascii_word}')"), "\tTABS",
-                 "node <<JS", f'''console.log("$(printf '%s' '{word}' | wc -m)");''', "JS",
-                 "python3 - <<PY", (f"print('{word}')", f"print('{ascii_word}')"), "PY",
-                 "python3 - <<'PY CODE'", (f"print('{word}')", f"print('{ascii_word}')"), "PY CODE"]
-        command = "\n".join(line[0] if isinstance(line, tuple) else line for line in lines)
-        expected = "\n".join(line[1] if isinstance(line, tuple) else line for line in lines)
+    def test_a_round_carries_each_command_as_its_reviewer_wrote_it(self):
         self.order("004-four", "Four")
-        head = self.commit()
-        claim = f"A claim about {word}."
-        self.records("004-four", head, review={"findings": [
-            {"claim": claim, "command": command, "exit": 1, "counts": True}]})
-        review = self.repo / ".ceo" / "runs" / "004-four" / "review.json"
-        before = review.read_bytes()
-        self.assertEqual(self.filed(head), ["orders/004-round-2.md"])
-        made = (self.repo / "orders" / "004-round-2.md").read_text()
-        self.assertIn(f"\n- {claim}: `{expected}`\n\nDo this", made)
-        check = ceo.parse_order(made)[1].split("\n(\n", 1)[1].split("\n) || {", 1)[0]
-        self.assertEqual(check, expected)
-        self.assertEqual(made.count(expected), 2)
-        self.assertEqual(review.read_bytes(), before)
-        self.assertEqual(ceo.escaped(expected), expected, "a later round must not escape the escapes again")
+        made = self.round_of("004-four", self.commit(), COMMANDS)
+        block = ceo.parse_order(made)[1]
+        for i, command in enumerate(COMMANDS, 1):
+            with self.subTest(command=command):
+                self.assertIn(f"\n- Claim {i}.: `{command}`\n", made)
+                self.assertEqual(block.count(f"bash -c {shlex.quote(command)} || "), 1)
+        self.assertNotIn("\\u", made, "the kernel spelled a letter of a command as an escape")
+        review = ceo.read_json(self.repo / ".ceo" / "runs" / "004-four" / "review.json")
+        self.assertEqual([one["command"] for one in review["findings"]], list(COMMANDS), "the review's record changed")
 
-    def test_ascii_shell_comments_do_not_open_heredocs(self):
-        word = "\u041f"
-        shell = f"python3 --version # <<'true'\nprintf '%s' '{word}'\ntrue"
-        self.assertEqual(ceo.escaped(shell), shell)
-        for before in ("# <<'HIDE'\n", "printf '%s' \"<<'HIDE'\"\n", "printf '%s' \\#\n"):
-            command = before + f"python3 - <<'PY' # <<'HIDE'\nprint('{word}')\nPY"
-            with self.subTest(before=before):
-                self.assertEqual(ceo.escaped(command), command.replace(word, r"\u041f"))
+    def test_each_command_runs_in_its_round_as_it_runs_alone(self):
+        stub = self.tmp / "bin" / "node"
+        stub.parent.mkdir()
+        stub.write_text(f"#!{sys.executable}\n{NODE}")
+        stub.chmod(0o755)
+        env = {**self.env, "PATH": f"{stub.parent}:{self.env['PATH']}"}
+        bash = lambda script: subprocess.run(["bash", "-c", script], cwd=self.repo, env=env, capture_output=True)
+        for at, command in enumerate(COMMANDS):
+            self.project(f"alone-{at}")
+            self.order("002-two", "Two")
+            block = ceo.parse_order(self.round_of("002-two", self.commit(), [command]))[1]
+            (self.repo / "built").touch()
+            for state in ("without word.txt", "with word.txt"):
+                if state == "with word.txt":
+                    (self.repo / "word.txt").write_text(WORD + "\n", encoding="utf-8")
+                alone, round_ = bash(command), bash(block)
+                with self.subTest(command=command, state=state):
+                    held = b"" if alone.returncode == 0 else b"finding 1 of the review still holds\n"
+                    self.assertEqual((round_.returncode == 0, round_.stdout, round_.stderr),
+                                     (alone.returncode == 0, alone.stdout + held, alone.stderr))
 
-    def test_ascii_heredoc_delimiters_use_shell_quote_removal(self):
-        word = "\u041f"
-        for delimiter in (r"\END", r"E\ND", "'E'ND", 'E"ND"', "'END'", '"END"'):
-            for opener, body in (("python3 -", f"print('{word}')"),
-                                 ("node", f"console.log('{word}', `{word}`)")):
-                with self.subTest(delimiter=delimiter, opener=opener):
-                    command = f"{opener} <<{delimiter}\n{body}\nEND\nprintf '%s' '{word}'"
-                    escaped_body = body.replace(word, r"\u041f")
-                    expected = f"{opener} <<{delimiter}\n{escaped_body}\nEND\nprintf '%s' '{word}'"
-                    self.assertEqual(ceo.escaped(command), expected)
-        command = f"cat <<\\END\nnode <<'JS'\nconsole.log('{word}')\nJS\nEND"
-        self.assertEqual(ceo.escaped(command), command)
-
-    def test_ascii_js_blocks_allow_regex_and_keep_tagged_templates(self):
-        word = "\u041f"
-        for block in ("{}", "if (true) {}", "if (true) {{}} else {}", "while (false) {}",
-                      "for (; false;) {}", "try {} catch (error) {} finally {}"):
-            with self.subTest(block=block):
-                command = (f"node <<'JS'\n{block} /'/.test('x'); const raw = String.raw`{word}`; "
-                           f"if (raw !== '{word}') throw Error(raw);\nJS")
-                self.assertEqual(ceo.escaped(command), command.replace(f"'{word}'", r"'\u041f'"))
-        # An object's closing brace still ends an expression: the slashes below are division.
-        command = f"node <<'JS'\nconst n = {{valueOf() {{ return 4; }}}} / '{word}'.length / 2;\nJS"
-        self.assertEqual(ceo.escaped(command), command.replace(word, r"\u041f"))
-        command = f"node <<'JS'\nconsole.log(`${{{{valueOf() {{ return 4; }}}} / '{word}'.length / 2}}`);\nJS"
-        self.assertEqual(ceo.escaped(command), command.replace(word, r"\u041f"))
-        command = f"node --input-type=module <<'JS'\nconsole.log(({{await: 4}})?.await / '{word}'.length / 2);\nJS"
-        self.assertEqual(ceo.escaped(command), command.replace(word, r"\u041f"))
-
-    def test_ascii_await_and_yield_are_not_template_tags(self):
-        word = "\u041f"
-        for program in (f"const s = await `{word}`;", f"function* f() {{ yield `{word}`; }}",
-                        f"async function f() {{ return await `{word}`; }}",
-                        f"function* f() {{ yield /* comment */ `{word}`; }}"):
-            with self.subTest(program=program):
-                command = f"node --input-type=module <<'JS'\n{program}\nJS"
-                self.assertEqual(ceo.escaped(command), command.replace(word, r"\u041f"))
-        for name in ("await", "yield"):
-            program = f"const {name} = String.raw; const s = {name}`{word}`; if (s !== '{word}') throw Error(s);"
-            for wrapper in ("%s", "function f() { %s } f();", "const f = () => { %s }; f();",
-                            "async function outer() { ({ inner() { %s } }).inner(); } outer();",
-                            "async function outer() { function inner() { %s } inner(); } outer();"):
-                command = "node <<'JS'\n" + wrapper % program + "\nJS"
-                with self.subTest(tag=name, wrapper=wrapper):
-                    self.assertEqual(ceo.escaped(command), command.replace(f"'{word}'", r"'\u041f'"))
-        for program in (f"async function f() {{ return await `{word}`; }} f();",
-                        f"function* f() {{ yield `{word}`; }} f().next();",
-                        f"const f = async () => await `{word}`; f();",
-                        f"const f = async x => await `{word}`; f();",
-                        f"const f = async () => {{ return await `{word}`; }}; f();"):
-            command = f"node <<'JS'\n{program}\nJS"
-            with self.subTest(program=program):
-                self.assertEqual(ceo.escaped(command), command.replace(word, r"\u041f"))
-        for name, outer, call in (("await", "async function", "outer()"), ("yield", "function*", "outer().next()")):
-            command = (f"node <<'JS'\nglobalThis.{name} = String.raw; {outer} outer() {{ "
-                       f"function inner(s = {name}`{word}`) {{ if (s !== '{word}') throw Error(s); }} inner(); }} {call};\nJS")
-            self.assertEqual(ceo.escaped(command), command.replace(f"'{word}'", r"'\u041f'"))
-        command = (f"node <<'JS'\nconst f = async () => await '{word}'\nconst await = String.raw\n"
-                   f"const s = await`{word}`\nif (s !== '{word}') throw Error(s)\nJS")
-        self.assertEqual(ceo.escaped(command), command.replace(f"'{word}'", r"'\u041f'"))
-        for expression in (f"async () => await '{word}'\nglobalThis.s = await`{word}`",
-                           f"async () => await '{word}'\n{{ const s = await`{word}`; if (s !== '{word}') throw Error(s); }}",
-                           f"false ? async () => await '{word}' : await`{word}`"):
-            command = (f"node <<'JS'\nglobalThis.await = String.raw; const f = {expression};\nJS")
-            self.assertEqual(ceo.escaped(command), command.replace(f"'{word}'", r"'\u041f'"))
-        command = f"node <<'JS'\nconst f = async () => true ? await `{word}` : await `{word}`; f();\nJS"
-        self.assertEqual(ceo.escaped(command), command.replace(word, r"\u041f"))
+    def test_a_later_round_carries_the_command_its_round_carried(self):
+        self.order("004-four", "Four")
+        block = ceo.parse_order(self.round_of("004-four", self.commit(), COMMANDS))[1]
+        carried = [shlex.split(piece)[0] for piece in block.split("\nbash -c ")[1:]]
+        self.assertEqual(carried, list(COMMANDS))
+        made = self.round_of("004-round-2", self.git("rev-parse", "main"), carried)
+        for i, command in enumerate(COMMANDS, 1):
+            with self.subTest(command=command):
+                self.assertIn(f"\n- Claim {i}.: `{command}`\n", made)
 
     def test_a_round_refused_is_suppressed_and_the_others_are_filed(self):
         self.order("006-six", "Six")
         self.order("007-seven", "Seven")
         head = self.commit()
-        self.records("006-six", head, review={"findings": [{"claim": "A fence.", "command": f"{FENCE}bash",
+        self.records("006-six", head, review={"findings": [{"claim": "A fence.", "command": f"true\n{FENCE}bash",
                                                             "exit": 1, "counts": True}]})
         self.records("007-seven", head)
         self.assertEqual(self.filed(head), ["orders/007-round-2.md"])
@@ -467,8 +393,8 @@ class Scene(FixCase):
         self.assertIn("\nORDER: 001\nROUND: 2\nREPLACES: orders/001-one.md\n", text.split("\n## ", 1)[0])
         self.assertIn("\n- The work leaves no file named fixed.: `test -f fixed`\n", text)
         self.assertNotIn("ls >/dev/null", text)
-        self.assertEqual(ceo.parse_order(text)[1].split("\n")[1:4],
-                         ["(", "test -f fixed", ") || { echo \"finding 1 of the review still holds\"; exit 1; }"])
+        self.assertEqual(ceo.parse_order(text)[1].split("\n")[1:2],
+                         ["bash -c 'test -f fixed' || { echo \"finding 1 of the review still holds\"; exit 1; }"])
         self.assertRegex(said[-1], r"ceo: started the run of \S*orders/001-round-2\.md", "round 2 did not start then")
         wait(lambda: record("001-round-2", "result.json").get("state") in ("done", "failed"), "round 2 run")
         self.assertEqual(record("001-round-2", "result.json")["state"], "done")

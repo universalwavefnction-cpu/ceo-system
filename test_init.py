@@ -8,8 +8,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from ceo import settings
+from ceo import seed_lessons, settings
 
 KERNEL = Path(__file__).resolve().parent
 CEO = KERNEL / "ceo.py"
@@ -106,7 +107,7 @@ class Init(unittest.TestCase):
                                   "## What it must never do"])
         guide = (self.repo / "orders" / "README.md").read_text()
         self.assertEqual(guide, (KERNEL / "orders" / "README.md").read_text())
-        self.assertEqual(len(guide.splitlines()), 10)
+        self.assertEqual(len(guide.splitlines()), 7)
         self.assertEqual((self.repo / "LESSONS.md").read_text(), (KERNEL / "routines" / "lessons.md").read_text())
         self.assertEqual((self.repo / "CEO.md").read_text(), (KERNEL / "CEO.md").read_text())
         self.assertEqual(settings(self.repo), {"name": "portal"})
@@ -325,27 +326,109 @@ class Init(unittest.TestCase):
         # What the run made stays out of git: init's line in .gitignore.
         self.assertEqual(self.status(), [])
 
-    def test_init_suggests_keeping_claude_codes_transcripts_90_days_and_never_writes_its_settings(self):
+    def test_init_ends_with_its_three_steps_names_no_transcript_setting_and_writes_nothing_in_claude_codes_folder(self):
         home, config = self.tmp / "home", self.tmp / "claude"
         settings_file, theirs = home / ".claude" / "settings.json", b'{\n  "theme": "dark"\n}\n'
         settings_file.parent.mkdir(parents=True)
         settings_file.write_bytes(theirs)
         config.mkdir()
         # CLAUDE_CONFIG_DIR empty is unset: Claude Code's folder is ~/.claude, under HOME.
-        for repo, folder, more in ((self.repo, home / ".claude", {"CLAUDE_CONFIG_DIR": ""}),
-                                   (self.project("blog"), config, {"CLAUDE_CONFIG_DIR": str(config)})):
+        for repo, more in ((self.repo, {"CLAUDE_CONFIG_DIR": ""}),
+                           (self.project("blog"), {"CLAUDE_CONFIG_DIR": str(config)})):
             self.env.update(HOME=str(home), **more)
             done = self.ceo("init", cwd=repo)
             self.assertEqual((done.returncode, done.stderr), (0, ""))
             lines = done.stdout.splitlines()
             self.assertEqual([line[:2] for line in lines if line[:2] in ("1.", "2.", "3.")], ["1.", "2.", "3."])
-            self.assertTrue(lines[-2].startswith("3. Start the tick: "), lines)  # after the three steps
-            self.assertEqual(lines[-1], "ceo: Claude Code keeps its transcripts 30 days; to keep them 90, for this "
-                                        f'project\'s memory, add "cleanupPeriodDays": 90 to {folder / "settings.json"}: '
-                                        "the kernel never sets it.")
+            self.assertTrue(lines[-1].startswith("3. Start the tick: "), lines)  # the last line is the third step
+            self.assertNotIn("cleanupPeriodDays", done.stdout)
             self.assertEqual(settings_file.read_bytes(), theirs)
             self.assertEqual(sorted(home.rglob("*")), [home / ".claude", settings_file])
             self.assertEqual(list(config.iterdir()), [], "init wrote in Claude Code's folder")
+
+    def test_the_tick_seeds_the_page_once_in_a_project_an_older_init_set_up_and_never_over_the_owners(self):
+        page = (KERNEL / "routines" / "lessons.md").read_bytes()  # init's page, byte for byte
+        seeded = ["ceo: LESSONS.md, the lessons page init seeds, is on main."]
+        (self.tmp / "worker.py").write_text(WORKER)  # never started: no order is filed
+        worker = shlex.join([sys.executable, str(self.tmp / "worker.py")])
+
+        def older(name, init=True, origin=True):
+            """A project on main as an init older than the page left it: VISION.md, orders/README.md, no LESSONS.md."""
+            repo = self.tmp / name
+            self.git("init", "-q", "-b", "main", str(repo), cwd=self.tmp)
+            (repo / ".gitignore").write_text(".ceo/\n")
+            (repo / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nrecheck_wait = 0\nnight = ""\ncleaner = ""\n')
+            (repo / "orders").mkdir()
+            if init:
+                (repo / "orders" / "README.md").write_bytes((KERNEL / "orders" / "README.md").read_bytes())
+                (repo / "VISION.md").write_text("A scratch project.\n")
+            self.git("add", "-A", cwd=repo)
+            self.git("commit", "-qm", "set up", cwd=repo)
+            if origin:
+                self.git("init", "-q", "--bare", "-b", "main", f"{repo}.git", cwd=self.tmp)
+                self.git("remote", "add", "origin", f"{repo}.git", cwd=repo)
+                self.git("push", "-q", "-u", "origin", "main", cwd=repo)
+            return repo
+
+        def tick(repo):
+            done = self.ceo("tick", "--worker", worker, cwd=repo)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return [line for line in done.stdout.splitlines() if "LESSONS.md" in line or "lessons page" in line]
+
+        def main(repo):
+            """(commits, LESSONS.md or None) of origin's main when there is one, else of main here."""
+            where = Path(f"{repo}.git") if Path(f"{repo}.git").is_dir() else repo
+            shown = subprocess.run(["git", "cat-file", "blob", "main:LESSONS.md"], cwd=where, env=self.env,
+                                   capture_output=True)
+            return int(self.git("rev-list", "--count", "main", cwd=where)), None if shown.returncode else shown.stdout
+
+        for repo in (older("older"), older("alone", origin=False)):
+            self.assertEqual(tick(repo), seeded)
+            self.assertEqual(main(repo), (2, page))
+            self.assertEqual((repo / "LESSONS.md").read_bytes(), page)  # the folder followed main
+            self.assertIn("LESSONS.md", self.git("log", "-1", "--format=%B", "main", cwd=repo))
+            self.assertEqual(self.git("status", "--porcelain", cwd=repo), "?? STATUS.md")
+            self.assertEqual(tick(repo), [])
+            self.assertEqual(main(repo), (2, page))
+        # A tracked change of the owner's, or a folder off main, waits untouched; once clean and on main, it is seeded.
+        dirty = older("dirty")
+        (dirty / "VISION.md").write_text("Still writing.\n")
+        self.assertEqual((tick(dirty), main(dirty)), ([], (1, None)))
+        self.assertEqual((dirty / "VISION.md").read_text(), "Still writing.\n")
+        self.assertFalse((dirty / "LESSONS.md").exists())
+        self.git("checkout", "-q", "--", "VISION.md", cwd=dirty)
+        self.git("checkout", "-q", "-b", "side", cwd=dirty)
+        self.assertEqual((tick(dirty), main(dirty)), ([], (1, None)))
+        self.git("checkout", "-q", "main", cwd=dirty)
+        self.assertEqual((tick(dirty), main(dirty)), (seeded, (2, page)))
+        # An untracked page the owner is writing stays his, and nothing is committed.
+        drafting = older("drafting")
+        (drafting / "LESSONS.md").write_text("My own page, not committed yet.\n")
+        self.assertEqual((tick(drafting), main(drafting)), ([], (1, None)))
+        self.assertEqual((drafting / "LESSONS.md").read_text(), "My own page, not committed yet.\n")
+        # A page of the project's own stays as it is, here or on origin's main the folder has not pulled yet.
+        own, lagging = older("own"), older("lagging")
+        for repo in (own, lagging):
+            (repo / "LESSONS.md").write_text("Our own lessons.\n")
+            self.git("add", "LESSONS.md", cwd=repo)
+            self.git("commit", "-qm", "our page", cwd=repo)
+            self.git("push", "-q", "origin", "main", cwd=repo)
+        self.git("reset", "-q", "--hard", "HEAD~", cwd=lagging)  # as if pushed from another checkout:
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=lagging)  # only the tick's fetch sees it
+        for repo in (own, lagging):
+            self.assertEqual((tick(repo), main(repo)), ([], (2, b"Our own lessons.\n")))
+        self.assertFalse((lagging / "LESSONS.md").exists())
+        # Checked again on the fresh base: a page that reached origin's main after the pass read main stays.
+        with mock.patch.dict(os.environ, self.env):
+            seed_lessons(lagging, "refs/heads/main")  # main as read before the other checkout pushed
+        self.assertEqual(main(lagging), (2, b"Our own lessons.\n"))
+        # An origin the pass could not fetch waits, saying nothing, for a pass that can.
+        unread = older("unread")
+        self.git("remote", "set-url", "origin", str(self.tmp / "gone.git"), cwd=unread)
+        self.assertEqual((tick(unread), self.git("rev-list", "--count", "main", cwd=unread)), ([], "1"))
+        # A repository init never set up gets nothing.
+        bare = older("bare", init=False)
+        self.assertEqual((tick(bare), main(bare)), ([], (1, None)))
 
 
 if __name__ == "__main__":

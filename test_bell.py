@@ -131,52 +131,6 @@ class Attention(BellCase):
             self.assertEqual(len(self.ring(T)), 2)
 
 
-class Idle(BellCase):
-    def setUp(self):
-        super().setUp()
-        self.order("001-x", ready=False)
-        self.commit("an order", "2026-10-25T10:00:00Z")
-        (self.repo / "IDEAS.md").write_text("# Ideas\n\n## 1 — 2026-10-25\n\nAn idea.\n")
-        self.idea = self.commit("Idea 1", "2026-10-25T11:00:00Z")
-        self.key = f"idle {self.idea[:12]}"
-
-    def test_no_start_for_12_hours_with_an_open_idea_rings_once(self):
-        self.started(T)
-        self.assertEqual(self.ring(T + 12 * HOUR), {})
-        found = self.ring(T + 12 * HOUR + 1)
-        self.assertEqual({key: (one["kind"], one["line"]) for key, one in found.items()}, {self.key: (
-            "idle", "no start for 12 hours, while IDEAS.md changed after the newest order and nothing waits for you")})
-        self.assertEqual(self.ring(T + 40 * HOUR), found)
-
-    def test_no_start_ever_counts_as_never(self):
-        self.assertEqual(list(self.ring(T)), [self.key])
-
-    def test_a_later_start_or_a_waiting_row_keeps_it_silent(self):
-        self.started(T - 30 * HOUR)
-        self.started(T - 11 * HOUR)
-        self.assertEqual(self.ring(T), {})
-        (self.repo / ".ceo" / "waiting").mkdir()
-        (self.repo / ".ceo" / "waiting" / "002-y.json").write_text("{}")
-        self.assertEqual(self.ring(T + 13 * HOUR), {})
-        (self.repo / ".ceo" / "waiting" / "002-y.json").unlink()
-        self.assertEqual(list(self.ring(T + 13 * HOUR)), [self.key])
-
-    def test_an_idea_no_newer_than_the_newest_order_keeps_it_silent(self):
-        self.order("002-after", ready=False)
-        self.commit("an order after the idea", "2026-10-25T12:00:00Z")
-        self.assertEqual(self.ring(T), {})
-        (self.repo / "IDEAS.md").write_text("# Ideas\n\n## 1 — 2026-10-25\n\nAn idea.\n\n## 2 — night\n\nMore.\n")
-        self.order("003-night", ready=False)
-        self.commit("a night: its ideas and its orders in one commit", "2026-10-25T13:00:00Z")
-        self.assertEqual(self.ring(T), {}, "a night alone opened an idea")
-
-    def test_origins_main_decides_when_the_folder_has_one(self):
-        self.git("update-ref", "refs/remotes/origin/main", "HEAD~1")  # origin's main is before the idea
-        self.assertEqual(self.ring(T), {})
-        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
-        self.assertEqual(list(self.ring(T)), [self.key])
-
-
 class Unstarted(BellCase):
     def stall(self, slug):
         return json.loads((self.repo / ".ceo" / "stalls" / f"{slug}.json").read_text())
@@ -233,7 +187,7 @@ class SendsNothing(BellCase):
         with mock.patch.object(socket, "socket", side_effect=AssertionError("a ring opened a socket")):
             self.ring(T + HOUR)
             found = self.ring(T + HOUR)
-        self.assertEqual(sorted(one["kind"] for one in found.values()), ["attention", "idle", "unstarted"])
+        self.assertEqual(sorted(one["kind"] for one in found.values()), ["attention", "unstarted"])
         self.assertEqual(files(), before, "a ring wrote outside its bells")
         self.assertFalse((self.repo / ".ceo" / "waiting").exists())
 

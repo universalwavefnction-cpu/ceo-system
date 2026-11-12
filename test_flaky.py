@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 import ceo
 from test_ceo import kernel_patch, order_text
-from test_pick import SpinCase, spin_order
 from test_tick import TickCase
 
 SCOPE = ("Judge the work only against what the order states in its Goal and Done when; a fault outside "
@@ -140,63 +139,6 @@ case "$n" in
 
     def test_reviewer_brief_limits_findings_to_the_order(self):
         self.assertIn(SCOPE, " ".join(ceo.BRIEF.split()))
-
-
-class FlakySpins(SpinCase):
-    def setUp(self):
-        super().setUp()
-        with (self.repo / "ceo.toml").open("a") as conf:
-            conf.write("recheck_wait = 0\n")
-
-    def test_flaky_spin_check_is_rerun(self):
-        check = ('test -f built || exit 1\n'
-                 'n=$(($(cat .count 2>/dev/null || echo 0) + 1)); echo $n > .count\n'
-                 'test $n -ge 2')
-        self.commit_order("050-spin.md", spin_order("one", "two", done_when=check))
-        self.ceo("run", "orders/050-spin.md", "--worker", self.model("spin"))
-        result = self.read("050-spin")
-        self.assertEqual(result["state"], "waiting")
-        for spin in result["spins"]:
-            self.assertEqual([run["exit_code"] for run in spin["done_when_runs"]], [1, 0])
-
-    def test_only_failed_spins_repeat_once_with_separate_output_tails(self):
-        check = '''test -f built || exit 1
-mkdir -p .ceo
-n=$(($(cat .ceo/count 2>/dev/null || echo 0) + 1)); echo $n > .ceo/count
-spin=$(cat built)
-i=1
-while test "$i" -le 45; do
-    echo "$spin attempt $n line $i" >&2
-    i=$((i + 1))
-done
-case "$spin" in
-    first) exit 0 ;;
-    flaky) test $n -ge 2 ;;
-    third) test $n -ge 3 ;;
-    never) exit 7 ;;
-esac
-'''
-        expected = {"first": [0], "flaky": [1, 0], "third": [1, 1], "never": [7, 7]}
-        self.commit_order("051-mixed.md", spin_order(*expected, done_when=check))
-        run = self.ceo("run", "orders/051-mixed.md", "--worker", self.model("spin"))
-        self.assertEqual(run.returncode, 3, run.stderr)
-        result = self.read("051-mixed")
-        self.assertEqual(result["state"], "waiting")
-        for spin in result["spins"]:
-            line = spin["line"]
-            runs = spin["done_when_runs"]
-            self.assertEqual([run["exit_code"] for run in runs], expected[line])
-            self.assertEqual(spin["done_when_exit"], expected[line][-1])
-            self.assertEqual(spin["finished"], line in ("first", "flaky"))
-            tree = self.repo / spin["worktree"]
-            self.assertEqual((tree / ".ceo/count").read_text().strip(), str(len(runs)))
-            for n, attempt in enumerate(runs, 1):
-                self.assertEqual(attempt["output"].splitlines(),
-                                 [f"{line} attempt {n} line {i}" for i in range(6, 46)])
-        self.assertEqual(result["done_when_runs"], [
-            {"spin": spin["spin"], **run} for spin in result["spins"]
-            for run in spin["done_when_runs"]])
-        self.assertEqual([spin["line"] for spin in self.choices("051-mixed")], ["first", "flaky"])
 
 
 class RecheckWait(unittest.TestCase):

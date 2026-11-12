@@ -52,27 +52,13 @@ class SelfReview(DoorCase):
                 self.assertEqual(worker, BLOCK + raw + ENDING)
                 self.assertEqual((worker.count(raw), worker.count(ENDING)), (1, 1))
 
-    def test_no_worker_of_mocks_or_spins_is_given_the_review_brief(self):
+    def test_no_worker_is_given_an_order_of_mocks_or_spins(self):
         for slug, kind in (("118-mocks", "Mocks"), ("119-spins", "Spins")):
             with self.subTest(kind):
-                raw = (order_text("test -f built") + f"\n## {kind}\n- red\n- blue\n"
-                       "\n## Preview\n`previews/card.html`\n").encode()
-                self.commit_order(f"{slug}.md", raw.decode())
+                self.commit_order(f"{slug}.md", order_text("test -f built") + f"\n## {kind}\n- red\n- blue\n")
                 run = self.ceo("run", f"orders/{slug}.md", "--worker", self.record)
-                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)  # record draws no previews
-                if kind == "Mocks":
-                    self.assertEqual(self.given_to("wt", slug), BLOCK + raw +
-                                     b"\nDraw every mock in this worktree; each preview file:\n"
-                                     b"1. red: previews/card-1.html\n2. blue: previews/card-2.html\n")
-                else:
-                    for n, line in enumerate(("red", "blue"), 1):
-                        self.assertEqual(self.given_to("wt", f"{slug}-spin-{n}"),
-                                         BLOCK + raw + f"\nYour spin: {line}\n".encode())
-        briefs = list(self.given.iterdir())
-        self.assertEqual(len(briefs), 3)
-        for brief in briefs:
-            self.assertNotIn(b"You are a fresh reviewer", brief.read_bytes())
-
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertEqual(list(self.given.iterdir()), [], "a worker was given an order of mocks or spins")
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,18 +7,13 @@ from unittest.mock import patch
 
 import ceo_review as review
 from test_door import DoorCase
-from test_pick import spin_order
 
 
 AMENDED = r'''
 elif mode == "amended":
-    name = os.path.basename(os.getcwd())
     build()
-    if "-spin-" not in name or name.endswith("-spin-1"):
-        slug = name.rsplit("-spin-", 1)[0]
-        subprocess.run(["git", "push", "-q", "origin", f"HEAD:refs/heads/order/{slug}"], check=True)
+    subprocess.run(["git", "push", "-q", "origin", f"HEAD:refs/heads/order/{os.path.basename(os.getcwd())}"], check=True)
     open("built", "w").write("revised\n")
-    open("preview.html", "w").write(name + "\n")
     subprocess.run(["git", "add", "-A"], check=True)
     subprocess.run(["git", "commit", "-q", "--amend", "--no-edit"], check=True)
 '''
@@ -33,10 +28,10 @@ class PrHandoff(DoorCase):
         self.ref = f"refs/heads/order/{self.slug}"
         self.waiting = self.repo / ".ceo/waiting" / f"{self.slug}.json"
 
-    def amended(self, text=None, code=0):
-        self.commit_order(f"{self.slug}.md", text)
+    def amended(self):
+        self.commit_order(f"{self.slug}.md")
         run = self.ceo("run", f"orders/{self.slug}.md", "--worker", self.model("amended"))
-        self.assertEqual(run.returncode, code, run.stdout + run.stderr)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         return self.read(self.slug), self.on_origin(self.ref)
 
     def ask(self, earlier, finished):
@@ -102,18 +97,6 @@ class PrHandoff(DoorCase):
         self.assertFalse(self.waiting.exists())
         self.assertEqual(self.on_origin(self.ref), foreign)
         self.assertEqual(self.calls(), [])
-
-    def test_picked_spin_conflict_is_not_an_interrupted_pick(self):
-        _, earlier = self.amended(spin_order("red", "blue"), code=3)
-        picked = self.ceo("pick", self.slug, "1")
-        self.assertEqual(picked.returncode, 0, picked.stdout + picked.stderr)
-        result = self.read(self.slug)
-        self.assertEqual(result["picked"], 1)
-        saved = self.ask(earlier, result["head"])
-        for _ in range(2):
-            self.assertNotIn("started the review", self.tick("--reviewer", self.model("clean")))
-            self.assertEqual(self.waiting.read_bytes(), saved)
-        self.assertEqual(self.on_origin(self.ref), earlier)
 
     def test_other_push_failures_remain_retryable(self):
         result, earlier = self.amended()

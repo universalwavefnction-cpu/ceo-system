@@ -12,8 +12,8 @@ def tick_idle(repo, children):
                 or any(held(path) for name in ("launch", "lock")
                        for path in (repo / ".ceo" / "decisions").glob(f"*/{name}")))
 
-def restart_kernel(repo, children, started, rejected):
-    """At a pass's end, exec changed, compilable code only while the kernel's project is idle."""
+def restart_kernel(repo, children, started, rejected, seen=None):
+    """At a pass's end, exec changed, compilable code only while the tick's project is idle."""
     try:
         code = kernel_code()
     except OSError:
@@ -21,6 +21,10 @@ def restart_kernel(repo, children, started, rejected):
     current = {name: hashlib.sha256(data).digest() for name, data in code.items()}
     changed = sorted(name for name in started.keys() | current.keys() if started.get(name) != current.get(name))
     content = frozenset(current.items())
+    if seen is not None:
+        previous, seen[:] = seen[:], [content]
+        if previous != [content]:
+            return  # new code runs only once two pass ends in a row read it alike, never a pull caught mid-write
     if not changed or content in rejected:
         return
     for name in changed:

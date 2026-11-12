@@ -107,7 +107,7 @@ class Plans(TickCase):
                           (PLAN.replace("at once 1", "at once 1\nat once 2"), once),
                           (PLAN.replace(f"- {A} —", f"- {A} after 002 —").replace(" after 001", ""),
                            "after must name earlier lines of the plan"),
-                          (PLAN.replace("after 001", "after 099"), "after 099 names an order outside the plan"),
+                          (PLAN.replace("after 001", "after 099"), "after 099 names an order no filed plan lists"),
                           (PLAN.replace(f"- {A} —", f"- {A} after 003 —"), "the plan's after lines make a cycle"),
                           (PLAN.replace("# Three steps\n", ""), "a plan needs a '# Title' line and at least one order"),
                           (PLAN + f"- {A}\n", "order number 001 occurs twice in the plan"),
@@ -301,8 +301,18 @@ class Plans(TickCase):
         self.plan.unlink()
         self.assertEqual(decide_plans(plan_snapshot(self.repo))["alone"], [A, B, C])
 
+    def test_a_malformed_plan_holds_what_it_lists_in_every_plan_a_later_round_too_until_mended(self):
+        D, R = "orders/004-d.md", "orders/005-a-two.md"  # R: round two of A, which the malformed plan lists
+        self.commit_order("004-d.md")
+        self.commit_order("005-a-two.md", f"ROUND: 2\nREPLACES: {A}\n" + order_text("test -f built"))
+        (self.repo / "plans" / "broad.md").write_text(f"# Broad\nat once 3\n- {B}\n- {D}\n- {R}\n")
+        self.save_plan(PLAN.replace("at once 1", "at once two"))
+        self.assertEqual(decide_plans(plan_snapshot(self.repo))["start"], [D])  # not B or R, the plan's
+        self.save_plan(PLAN)
+        self.assertEqual(decide_plans(plan_snapshot(self.repo))["start"], [D, R])  # B still waits for 001
+
     def test_a_floor_refusal_does_not_consume_the_plan_order(self):
-        (self.repo / "ceo.toml").write_text('disk_floor_gb = 1000000\nnight = ""\n')
+        (self.repo / "ceo.toml").write_text('disk_floor_gb = 1000000\nnight = ""\ncleaner = ""\n')
         said = self.tick("--worker", self.model("build"))
         self.assertIn("below the disk floor", said)
         self.assertFalse((self.repo / ".ceo" / "plan-starts" / Path(A).stem).exists())
@@ -488,10 +498,14 @@ class Crew(unittest.TestCase):
 
 
 class Documentation(unittest.TestCase):
-    def test_readme_fits_both_its_line_and_column_caps(self):
-        lines = (Path(__file__).resolve().parent / "README.md").read_text().splitlines()
+    def test_reference_fits_both_its_line_and_column_caps(self):
+        lines = (Path(__file__).resolve().parent / "REFERENCE.md").read_text().splitlines()
         self.assertLessEqual(len(lines), 100)
         self.assertEqual([(i, len(line)) for i, line in enumerate(lines, 1) if len(line) > 131], [])
+
+    def test_front_page_fits_its_line_cap(self):
+        lines = (Path(__file__).resolve().parent / "README.md").read_text().splitlines()
+        self.assertLessEqual(len(lines), 60)
 
 
 if __name__ == "__main__":

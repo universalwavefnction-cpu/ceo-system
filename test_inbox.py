@@ -1,6 +1,6 @@
 """The inbox end to end: `ceo.py idea` and `ceo.py answer` with real git (a local bare repository as
 origin), real processes and files; `ears/hermes.sh` from the shell. No model is called: the waiting
-row is a real run of spins built by the stub worker of test_pick."""
+row is a CEO's stop put to the owner, with its choices, as the kernel writes it."""
 import json
 import subprocess
 import sys
@@ -8,12 +8,11 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from test_door import DoorCase
-from test_pick import STUB, spin_order
+import ceo
+from test_door import STUB, DoorCase
 from test_tick import CEO
 
 EARS = Path(__file__).resolve().parent / "ears"
-SPINS = ["A dark sheet with large type", "A light sheet with small type"]
 # Words as the owner types them: another script, a line break, a leading dash, spaces kept.
 WORDS = "-- магазин: a shop that sells   one thing\nand ships it the same day  "
 
@@ -34,12 +33,14 @@ class InboxCase(DoorCase):
         return subprocess.run(["git", "show", f"{ref}:{path}"], cwd=self.repo, env=self.env, check=True,
                               capture_output=True, encoding="utf-8").stdout
 
-    def spun(self, slug="061-shop"):
-        """A run of two spins that waits for the owner's pick, as order 9's run leaves it."""
-        order = spin_order(*SPINS).replace("# An order", "# The page of the shop", 1)
-        self.commit_order(f"{slug}.md", order)
-        run = self.ceo("run", f"orders/{slug}.md", "--worker", self.model("spin"))
-        self.assertEqual(run.returncode, 3, run.stderr)
+    def asked(self, slug="061-shop"):
+        """A stop the CEO put to the owner, waiting for his word with its choices; the project listed as a run lists it."""
+        (self.repo / ".ceo").mkdir(exist_ok=True)
+        ceo.wait_on(self.repo, slug, {"order": f"orders/{slug}.md", "title": "The page of the shop", "decision": "d1",
+                                      "question": "Ship the page as it is?", "detail": "its CEO stopped",
+                                      "choices": ceo.DECIDE_CHOICES})
+        self.home.mkdir(parents=True, exist_ok=True)
+        (self.home / "projects.txt").write_text(f"{self.repo}\n")
         self.assertEqual([(row["slug"], row["state"]) for row in self.rows()], [(slug, "waiting")])
         return slug
 
@@ -147,25 +148,27 @@ class Idea(InboxCase):
 
 class Answer(InboxCase):
     def test_an_answer_lands_where_the_tick_reads_it_and_any_other_row_or_choice_is_refused(self):
-        slug = self.spun()
-        for wrong in (("061-nothing", "1"), (slug, "3"), (slug, "one")):
+        slug = self.asked()
+        for wrong in (("061-nothing", "cut"), (slug, "3"), (slug, "one"), (slug, "answer")):
             self.assert_refused(self.ceo("answer", *wrong))
         self.assertFalse((self.repo / ".ceo" / "answers").exists())
-        sent = self.ceo("answer", slug, "2", "--comment", "the light one reads better")
-        self.assertEqual((sent.returncode, sent.stdout), (0, f"ceo: sent 2 ({SPINS[1]}) for {slug}; the "
+        sent = self.ceo("answer", slug, "cut", "--comment", "the light one reads better")
+        self.assertEqual((sent.returncode, sent.stdout), (0, f"ceo: sent cut (cut) for {slug}; the "
                                                              "next tick takes it.\n"), sent.stderr)
         answer = self.answered(slug)
         self.assertEqual({key: answer[key] for key in ("pick", "choice", "comment")},
-                         {"pick": 2, "choice": SPINS[1], "comment": "the light one reads better"})
-        self.assertEqual(self.rows()[0]["answered"], SPINS[1])
-        self.tick("--worker", self.model("spin"), "--reviewer", self.model("clean"))  # read on the next tick
-        self.assertEqual((self.read(slug)["state"], self.read(slug)["picked"]), ("done", 2))
+                         {"pick": "cut", "choice": "cut", "comment": "the light one reads better"})
+        self.assertEqual(self.rows()[0]["answered"], "cut")
+        self.tick("--worker", self.model("clean"), "--reviewer", self.model("clean"))  # read on the next tick
+        self.assertEqual(self.on_main(f"orders/{slug}.cut", "origin/main"),
+                         "Cut on the owner's word: the light one reads better.\n")
         self.assertFalse((self.repo / ".ceo" / "answers" / f"{slug}.json").exists())
+        self.assertFalse((self.repo / ".ceo" / "waiting" / f"{slug}.json").exists())
 
 
 class Ears(InboxCase):
     def test_hermes_sh_carries_an_idea_and_an_answer_by_the_projects_name(self):
-        slug = self.spun()  # the run listed the repository in projects.txt; a gone one of its name first
+        slug = self.asked()  # the repository listed in projects.txt; a gone one of its name first
         listed = self.home / "projects.txt"
         listed.write_text(f"{self.tmp / 'gone' / 'repo'}\n{listed.read_text()}")
         hermes = lambda *args: subprocess.run([str(EARS / "hermes.sh"), *args], env=self.env,
@@ -173,10 +176,10 @@ class Ears(InboxCase):
         said = hermes("idea", "repo", WORDS)
         self.assertEqual((said.returncode, said.stdout), (0, "1\n"), said.stderr)
         self.assertIn(f"## 1 — {self.today}\n\n{WORDS}\n", self.on_main("IDEAS.md", "origin/main"))
-        said = hermes("answer", "repo", slug, "1", "the", "dark", "one")
+        said = hermes("answer", "repo", slug, "answer", "the", "dark", "one")
         self.assertEqual(said.returncode, 0, said.stderr)
         self.assertEqual({key: self.answered(slug)[key] for key in ("pick", "choice", "comment")},
-                         {"pick": 1, "choice": SPINS[0], "comment": "the dark one"})
+                         {"pick": "answer", "choice": "answer", "comment": "the dark one"})
         for wrong in (("idea", "nowhere", "words"), ("answer", "repo", slug, "9"), ("idea", "repo")):
             self.assertEqual(hermes(*wrong).returncode, 2, wrong)
 

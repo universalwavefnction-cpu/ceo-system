@@ -160,7 +160,7 @@ elif mode == "held-ceo":
     json.dump({"decision": "ask", "reason": "test complete", "question": "Continue?"}, open("DECISION.json", "w"))
 """)
         command = self.model("held-ceo", str(self.release))
-        (self.repo / "ceo.toml").write_text('disk_floor_gb = "not a number"\nram_floor_gb = 0\nstall_minutes = 0\nnight = ""\n'
+        (self.repo / "ceo.toml").write_text('disk_floor_gb = "not a number"\nram_floor_gb = 0\nstall_minutes = 0\nnight = ""\ncleaner = ""\n'
                                           + "ceo = " + json.dumps(command) + "\n")
         def finish_ceo():
             self.release.touch()
@@ -200,7 +200,7 @@ elif mode == "held-ceo":
         slug = "045-held"
         self.commit_order(f"{slug}.md")  # filed: every pass finds it eligible, and the tick's floor refuses it
         # No ceo in ceo.toml: claude's, the test's own, an agent CLI with a login.
-        (self.repo / "ceo.toml").write_text('disk_floor_gb = "not a number"\nram_floor_gb = 0\nstall_minutes = 0\nnight = ""\n')
+        (self.repo / "ceo.toml").write_text('disk_floor_gb = "not a number"\nram_floor_gb = 0\nstall_minutes = 0\nnight = ""\ncleaner = ""\n')
         decisions, record = self.repo / ".ceo" / "decisions", self.repo / ".ceo" / "stalls" / f"{slug}.json"
         self.addCleanup(lambda: [self.wait_for((folder / "applied.json").exists, "the CEO finished")
                                  for folder in decisions.glob("*")])
@@ -312,11 +312,11 @@ class Readiness(TickCase):
             self.assertEqual(self.records(), ["001-first"])
         self.assertIn("  - `orders/002-after.md` — After the first. — waiting for 001\n", self.status())
         self.assertIn("  - `orders/003-slot.md` — Third. — waiting for its plan's slot\n", self.status())
-        self.assertIn("- `001-first` is eligible and not started: the login of claude failed", self.status())
+        self.assertIn("- `001-first` is eligible and not started: the login of claude-auto failed", self.status())
         (self.repo / "orders" / "001-first.cut").touch()  # cut, never run: eligible no more
         self.idle_tick()
         self.assertEqual(self.records(), ["003-slot"])  # the slot it held is free; a cut blocks the second
-        self.assertTrue(self.record("003-slot")["reason"].startswith("the login of claude failed"))
+        self.assertTrue(self.record("003-slot")["reason"].startswith("the login of claude-auto failed"))
         self.assertNotIn("`001-first` is eligible", self.status())
 
     def test_an_order_run_by_hand_gets_its_record_on_the_next_pass_while_its_family_is_unfinished(self):
@@ -337,47 +337,11 @@ class Readiness(TickCase):
         self.assertEqual(self.record("001-hand"), {"since": since, "reason": ""})
 
 
-class PickLifetime(InboxCase):
-    def test_a_consumed_pick_finishes_its_review_before_the_tick_returns(self):
-        slug = self.spun()
-        ready, release = self.tmp / "review-ready", self.tmp / "review-release"
-        for path in (ready, release):
-            os.mkfifo(path)
-        ready_fd, release_fd = (os.open(path, os.O_RDWR) for path in (ready, release))
-        self.addCleanup(os.close, ready_fd)
-        self.addCleanup(os.close, release_fd)
-        self.stub.write_text(self.stub.read_text() + '''
-elif mode == "held-review":
-    if brief != b"Reply with the single word ok.\\n":
-        with open(args[0], "wb", buffering=0) as ready:
-            ready.write(b"ready")
-        with open(args[1], "rb", buffering=0) as release:
-            release.read(1)
-    answer()
-''')
-        self.assertEqual(self.ceo("answer", slug, "2").returncode, 0)
-        tick = self.ceo_bg("tick", "--worker", self.model("spin"), "--reviewer",
-                           self.model("held-review", str(ready), str(release)))
-        review = self.run_dir(slug) / "review.json"
-        try:
-            self.assertTrue(select.select([ready_fd], [], [], 30)[0], "the reviewer never reached its barrier")
-            self.assertEqual(os.read(ready_fd, 5), b"ready")
-            self.assertFalse(review.exists())
-            with self.assertRaises(subprocess.TimeoutExpired, msg="the tick left its picked review writing"):
-                tick.communicate(timeout=1)
-        finally:
-            os.write(release_fd, b"x")
-            out, err = tick.communicate(timeout=60)
-            self.wait_for(lambda: review.exists() and not ceo.held(self.repo / ".ceo" / "locks" / f"{slug}.review"),
-                          "the owned reviewer released its files")
-        self.assertEqual(tick.returncode, 0, err)
-        self.assertIn(f"started the review of orders/{slug}.md", out)
-        self.assertEqual(self.read(slug, "review.json")["verdict"], "survives")
-
-
 class Loop(InboxCase):
-    def test_the_every_loop_keeps_passing_while_a_picked_review_runs(self):
-        slug = self.spun()
+    def test_the_every_loop_keeps_passing_while_a_review_runs(self):
+        slug = "062-built"
+        self.commit_order(f"{slug}.md", order_text("test -f built"))
+        self.assertEqual(self.ceo("run", f"orders/{slug}.md", "--worker", self.model("build")).returncode, 0)
         ready, release = self.tmp / "ready", self.tmp / "release"
         for path in (ready, release):
             os.mkfifo(path)
@@ -391,8 +355,7 @@ elif mode == "held-review":
             release.read(1)
     answer()
 """)
-        self.assertEqual(self.ceo("answer", slug, "2").returncode, 0)
-        tick = self.ceo_bg("tick", "--every", "1", "--worker", self.model("spin"),
+        tick = self.ceo_bg("tick", "--every", "1", "--worker", self.model("build"),
                            "--reviewer", self.model("held-review", str(ready), str(release)))
         stamp = lambda: [line for line in (self.repo / "STATUS.md").read_text().splitlines()
                          if line.startswith("Last tick: ")]
@@ -409,7 +372,7 @@ elif mode == "held-review":
             os.write(wfd, b"x")
             self.wait_for(lambda: (self.run_dir(slug) / "review.json").exists() and not ceo.held(
                 self.repo / ".ceo" / "locks" / f"{slug}.review"), "the reviewer ended", timeout=60)
-        self.assertNotEqual(first, later, "no pass of the --every loop ran while the picked review was held")
+        self.assertNotEqual(first, later, "no pass of the --every loop ran while the review was held")
 
 
 if __name__ == "__main__":

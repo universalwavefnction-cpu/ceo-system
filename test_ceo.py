@@ -186,6 +186,21 @@ class CeoRun(unittest.TestCase):
             with self.subTest(name):
                 self.assert_refused(name, text)
 
+    def test_order_of_mocks_or_spins_is_refused_in_one_line_and_starts_nothing(self):
+        for name, extra in (("012-mocks", "\n## Mocks\n- red\n- blue\n"), ("013-spins", "\n## Spins\n- red\n- blue\n"),
+                            ("014-both", "\n## Mocks\n- red\n\n## Spins\n- red\n- blue\n")):
+            with self.subTest(name):
+                self.assert_refused(name, order_text("test -f built") + extra + "\n## Preview\n`card.html`\n")
+                self.assertEqual(self.ceo(f"{name}.md", "build").stderr, "ceo: refused: mocks and spins left the kernel: "
+                                 "the owner's picks run on a pick-sheet page outside it.\n")
+
+    def test_pick_with_any_words_or_options_is_refused_in_the_same_line(self):
+        for words in ([], ["--help"], ["-h"], ["old-slug", "--old-option"], ["076-old", "1"]):
+            with self.subTest(words):
+                done = subprocess.run([sys.executable, "-B", str(CEO), "pick", *words], capture_output=True, text=True)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (2, "", "ceo: refused: mocks and spins left "
+                                 "the kernel: the owner's picks run on a pick-sheet page outside it.\n"))
+
     def test_title_line_inside_a_fence_does_not_count(self):
         done_when = "# no title anywhere in this order\ntest -f made"
         self.assert_refused("fenced-title", order_text(done_when, title=None))

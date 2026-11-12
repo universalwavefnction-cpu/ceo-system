@@ -6,8 +6,9 @@ and Codex are first-class; Gemini is an example, untested.
 
 `worker` in `ceo.toml` is the default worker, the reviewer's fallback, the night's model and, without a
 `ceo`, the CEO that decides stalls. Without it the worker is
-`claude -p --permission-mode bypassPermissions --output-format stream-json --verbose` while `claude` is on
-PATH. `--worker`, `--reviewer` and `--model` on the command line win over it, and an order's `## Worker`
+`claude-auto -p --permission-mode bypassPermissions --output-format stream-json --verbose` while `claude-auto`
+(which picks the Claude account that answers) is on PATH, else the same with `claude` while `claude` is.
+`--worker`, `--reviewer` and `--model` on the command line win over it, and an order's `## Worker`
 over them all. Each block below is a whole `ceo.toml`; `ceo.py init` writes the `name`.
 
 ## Claude Code
@@ -81,13 +82,50 @@ you set `quota_cmd.openai` or `quota_cmd.google`.
 
 ## Login
 
-Only claude's login is probed: one turn, trusted ten minutes, and a failure holds only claude's starts (a
-program you give `isolation.<program>` flags in `ceo.toml` is probed too). Any other program, Codex and
-Gemini too, is said once in `.ceo/tick.log` to have no login probe, and a failed
-login shows only as its runs failing. The kernel starts claude with `--setting-sources project`; Codex and
-Gemini start with their user's own settings. `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
-`ANTHROPIC_API_KEY`, `OPENAI_BASE_URL` and `GOOGLE_GEMINI_BASE_URL` are taken out of every agent's
+Only claude's and claude-auto's login is probed: one turn, trusted ten minutes, and a failure holds only
+that program's starts (a program you give `isolation.<program>` flags in `ceo.toml` is probed too). Any other
+program, Codex and Gemini too, is said once in `.ceo/tick.log` to have no login probe, and a failed
+login shows only as its runs failing. The kernel starts claude and claude-auto with
+`--setting-sources project`; Codex and Gemini start with their user's own settings. `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_BASE_URL` and `GOOGLE_GEMINI_BASE_URL` are taken out of every agent's
 environment unless `keep_env` names them; other API keys stay, as a Codex or Gemini user's own login.
+
+## The wall
+
+`tools/box CMD ARGS...` runs a command behind a wall, in the same folder, with the same input, output and exit
+code; it is opt-in, and the kernel's code and default worker do not change. Behind it the command:
+- writes only its own folder (the order's worktree), the git folders a commit there needs (the worktree's own
+  folder in the main repository's `.git`, with its `objects`, `refs`, `logs` and `packed-refs`) and the temp
+  folders; the main repository's `config`, `hooks` and index stay read-only;
+- cannot read `~/.ssh`, gh's config folder, `~/.git-credentials`, `~/.netrc` or the SSH agent's socket, and gets
+  no `SSH_AUTH_SOCK`, `GH_TOKEN` or `GITHUB_TOKEN`; the network stays open.
+
+`sandbox-exec` builds the wall on macOS and `bwrap` (bubblewrap) on Linux. A host with neither, or whose bwrap may
+not make user namespaces, refuses: exit 125, one line on stderr, the command never run unwalled. That is a
+harness exiting in its first minute, so the kernel retries it as any such exit (see API errors), then blocks.
+`BOX_TOOL=none` refuses anywhere.
+
+```toml
+worker = "/path/to/ceo-system/tools/box claude -p --permission-mode bypassPermissions --output-format stream-json --verbose"
+isolation.box = "--setting-sources project"
+```
+
+The `worker` line names the box by an absolute path, in a checkout no worker writes: a relative `tools/box` would
+start the worktree's own copy, which the worker may rewrite before its next round. The `isolation.box` line is
+there because the kernel keys a command by its first word without its folder, and that word is now `box`: with
+no line for it, claude loses `--setting-sources project`, so the user's own settings and hooks load in the
+worker, and its login is never probed. A boxed command's vendor is `box`'s: `claude` unless `vendor.box` names
+another, so a project boxes one vendor's programs.
+
+What the wall does not stop:
+- On macOS the login keychain stays open, Claude Code's own login being read through it, and so does a GitHub
+  token kept there; only git's keychain helper is shut.
+- Claude Code saves none of its state but its login file; its settings and hooks stay read-only, since the user's
+  own sessions would run what a worker wrote there.
+- Any other file the user can read stays readable.
+- Any branch of the repository can still be moved, the refs being shared.
+- What the kernel runs in the worktree afterwards (the done-when, the door's check, a reviewer's command) runs
+  outside the wall.
 
 ## The session
 
@@ -98,4 +136,4 @@ environment unless `keep_env` names them; other API keys stay, as a Codex or Gem
 - Codex: `-c developer_instructions=<SESSION.md>`, its text as a JSON string, which `-c` reads as TOML;
   codex-cli 0.159.2 shows it as a developer message (`codex debug prompt-input`). `--continue` is
   `codex resume --last`.
-- Gemini: no flags, and one line on stderr says the session opens without `SESSION.md`.
+- Gemini, with no system-prompt flag: `-i <SESSION.md>`, its first message, and the session stays open; always new.

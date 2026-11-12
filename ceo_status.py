@@ -10,26 +10,30 @@ UNSTARTED = re.compile(r"- `[^`]+` is eligible and not started: ")  # each stall
 BELL_SINCE = datetime(2026, 10, 25, tzinfo=timezone.utc).timestamp()  # older stops ring no bell: no first-pass burst
 DECIDE_CHOICES = [{"pick": "answer", "text": "answer", "ask": "Your answer, for the CEO:"},
                   {"pick": "cut", "text": "cut"}]
-def wait_on(repo, slug, row):
-    """Write the owner's waiting row, timestamped for oldest-first ordering."""
+def wait_on(repo, slug, row, where=""):
+    """Write the owner's waiting row, its question and detail clipped, timestamped for oldest-first ordering."""
     (repo / ".ceo" / "waiting").mkdir(exist_ok=True)
-    write_json(repo / ".ceo" / "waiting" / f"{slug}.json", {**row, "time": now("microseconds")})
+    write_json(repo / ".ceo" / "waiting" / f"{slug}.json", {**row, "time": now("microseconds"), **{
+        key: clipped(row[key], where) for key in ("question", "detail") if key in row}})
+def clipped(text, where=""):
+    """text past 40 lines or 4,000 characters cut to 4,000 or fewer: its first 40 lines, what is left out and where."""
+    if not isinstance(text, str) or len(lines := text.splitlines()) <= 40 and len(text) <= 4000:
+        return text
+    shown = (whole := "\n".join(lines[:40]))[:min(3800, 3900 - len(where))]  # leaves room for a long where
+    left = len(lines) - (min(40, len(lines)) if shown == whole else len(shown.splitlines()))  # one in part is shown
+    return f"{shown} [{left} more lines left out" + f"; the whole text: `{where}`" * bool(where) + "]"
 def waiting_rows(repo):
-    """The paths of repo's waiting rows, the oldest first; by name, those written before rows had a time."""
-    return sorted((repo / ".ceo" / "waiting").glob("*.json"),
-                  key=lambda path: (str(read_json(path).get("time") or ""), path.name))
+    """The paths of repo's waiting rows that ask the owner, with choices, the oldest instant first, whatever its offset;
+    first by name, those without. A row of mocks or spins, from before they left the kernel, asks him nothing."""
+    def instant(path):
+        with contextlib.suppress(ValueError, TypeError):
+            return datetime.fromisoformat(read_json(path).get("time")).timestamp()
+        return float("-inf")
+    return sorted((path for path in (repo / ".ceo" / "waiting").glob("*.json") if asked_choices(read_json(path))),
+                  key=lambda path: (instant(path), path.name))
 def asked_choices(waiting):
     """Return explicit choices, or the standard choices for a CEO decision predating them."""
     return waiting.get("choices") or (DECIDE_CHOICES if waiting.get("decision") else [])
-def ask(repo, slug, result):
-    """Publish finished previews through the shared numbered-choice format."""
-    choices = [{key: entry[key] for key in ("spin", "line", "branch", "head", "preview")}
-               for entry in result.get("mocks") or result["spins"] if entry["finished"]]
-    kind = "mocks" if result.get("mocks") else "spins"
-    detail = f"{len(choices)} {kind} wait for your pick"
-    extra = {"question": "Which mock do you pick?", "detail": detail} if kind == "mocks" else {}
-    wait_on(repo, slug, {"order": result["order"], "title": result["title"], "spins": choices, **extra})
-    event(repo, "waiting", slug, f"{result['title']}: {detail}.")
 def ceo_merge_pending(result):
     override = result.get("ceo_merge") or {}
     return bool(override and override.get("head") == result.get("head")
@@ -63,17 +67,14 @@ def attention_lines(repo):
                          f"{str(found['push']).rstrip('.')}; it was recorded here first, and the tick pushes it "
                          "once origin takes it, before another night runs")
 def choices(path):
-    """STATUS.md's waiting run and numbered choices, including mock picks, bugs and CEO stops."""
+    """STATUS.md's waiting run and numbered choices, of a waiting row that asks, a bug's or a CEO stop's."""
     waiting = read_json(path)
-    if found := asked_choices(waiting):  # a word that is the choice itself is said once
-        word = ("<n>", "detail") if waiting.get("bug") else ("<choice>", "text")
-        return [f"- `{waiting.get('order')}` {waiting.get('title')}: {waiting.get('question')} "
-                f"`python3 ceo.py answer {path.stem} {word[0]} [--comment \"<{word[1]}>\"]`",
-                *(f"  - {one['pick']}. {one['text']}" if str(one["pick"]) != one["text"] else f"  - {one['text']}"
-                  for one in found)]
-    return [f"- `{waiting.get('order')}` {waiting.get('title')}: `python3 ceo.py pick {path.stem} <n>`",
-            *(f"  - {spin['spin']}. {spin['line']}: `{spin['preview']}`"
-              for spin in waiting.get("spins", []))]
+    word = ("<n>", "detail") if waiting.get("bug") else ("<choice>", "text")
+    question = " ".join(str(clipped(waiting.get("question"), f".ceo/waiting/{path.name}")).split())
+    return [f"- `{waiting.get('order')}` {waiting.get('title')}: {question} "
+            f"`python3 ceo.py answer {path.stem} {word[0]} [--comment \"<{word[1]}>\"]`",  # a word that is the choice
+            *(f"  - {one['pick']}. {one['text']}" if str(one["pick"]) != one["text"] else f"  - {one['text']}"
+              for one in asked_choices(waiting))]  # itself is said once
 def readiness(repo, tried, live=()):
     """Keep each eligible order's first since and latest refusal; clear reasons on start, remove obsolete unstarted rows."""
     ceo = repo / ".ceo"
@@ -130,7 +131,6 @@ def stall_snapshot(repo, ready=None):
         rows[slug] = {"ready": began, "last_progress": max(began or 0, activity.get(slug, 0)), "state": "ready" if began is not None else "filed",
                       "merged": bool(result.get("merged")), "cut": orders[path]["cut"],
                       "waiting": ceo_merge_pending(result) or (ceo / "waiting" / f"{slug}.json").exists(), "last_log": "",
-                      "mock_picked": bool(result.get("mocks") and result.get("picked")),
                       "inactive": family["finished"] or family["latest"] != path, "alive": slug in working}
         rows[slug]["waiting"] |= not run_recorded(repo, slug) and any(
             slugify(Path(p).stem) in activity for p in family["members"] if p != path)
@@ -162,16 +162,16 @@ def stall_snapshot(repo, ready=None):
     for path, family in families.items():
         if any(rows[slugify(Path(p).stem)]["merged"] for p in family["members"]):
             rows[slugify(Path(path).stem)]["inactive"] = True
-    # A folder with local changes runs orders from origin and lags it: a round merged there ends the family, and a
-    # join or the kernel's fix round (titled as routines/fix.md titles it) filed there ends the runs before it; a
-    # cut or the CEO's round there, under any other title, waits for its decision's receipt.
-    if source:
-        for path, family in theirs.items():
-            latest = family["latest"]
-            ended = latest != path and (re.search(r"-join-[0-9a-f]{7}\.md$", latest) or re.match(
-                r"# .*: round [0-9]+, its review's findings fixed$", upstream[latest]["text"], re.M))
-            if path in orders and (family["complete"] or ended):
-                rows[slugify(Path(path).stem)]["inactive"] = True
+    # A folder with local changes runs orders from origin and lags it: a round merged there ends the family, a join or
+    # the kernel's fix round (titled as routines/fix.md titles it) filed there ends the runs before it, and a cut there
+    # ends a run the bug door noted closed here; another cut or the CEO's round there waits for its decision's receipt.
+    for path, family in theirs.items():  # none with no origin
+        latest, slug = family["latest"], slugify(Path(path).stem)
+        ended = latest != path and (re.search(r"-join-[0-9a-f]{7}\.md$", latest) or re.match(
+            r"# .*: round [0-9]+, its review's findings fixed$", upstream[latest]["text"], re.M))
+        closed = upstream[path]["cut"] and read_json(ceo / "runs" / slug / "result.json").get("closed")
+        if path in orders and (family["complete"] or ended or closed):
+            rows[slug]["inactive"] = True
     log = ceo / "tick.log"
     if log.is_file():
         names = re.compile(r"(?<![\w-])(" + "|".join(map(re.escape, sorted(rows, key=len, reverse=True)))
@@ -183,7 +183,7 @@ def stall_snapshot(repo, ready=None):
     return rows
 def stalled(snapshot, at, stall_minutes=45):
     """The stall rule, from one order's file snapshot and the clock alone."""
-    return (snapshot["ready"] is not None and not any(snapshot.get(key) for key in ("mock_picked", "inactive", "alive"))
+    return (snapshot["ready"] is not None and not any(snapshot.get(key) for key in ("inactive", "alive"))
             and not any(snapshot[key] for key in ("merged", "cut", "waiting"))
             and at - snapshot["last_progress"] > stall_minutes * 60)
 def stall_line(record):
@@ -219,8 +219,32 @@ def watch_stalls(repo):
     record_stalls(repo, snapshot, time.time(), minutes)
     return snapshot
 
+def identity(stall):
+    return hashlib.sha256(json.dumps(stall, sort_keys=True).encode()).hexdigest()
+def idle_spell(repo, snapshot, at):
+    """An open intent with nothing alive, stalled, asked within a day, run or filed for 30 minutes: the spell, else None."""
+    main = "refs/remotes/origin/main" if rev(repo, "refs/remotes/origin/main") else "refs/heads/main"
+    tree = set(git("ls-tree", "-rz", "--name-only", main, "--", "intents", cwd=repo).stdout.split("\0"))  # its files
+    intents = sorted(name for name in tree if re.fullmatch(r"intents/[^/]+\.md", name) and name[:-3] + ".closed" not in tree)
+    if not intents or any(row["alive"] or stalled(row, float("inf")) for row in snapshot.values()) or any(
+            held(path) for path in (repo / ".ceo" / "locks").glob("*.lock")):
+        return None
+    for path in (repo / ".ceo" / "waiting").glob("*.json"):  # one without a readable time is old
+        with contextlib.suppress(ValueError, TypeError):
+            if at - datetime.fromisoformat(read_json(path).get("time")).timestamp() < 86400:
+                return None
+    last = [int(git("log", "-1", "--no-renames", "--diff-filter=A", "--format=%ct", main, "--", ":(glob)orders/*.md",
+                    ":(glob)intents/*.md", cwd=repo).stdout.strip() or 0)]
+    for seen in events(repo)[0]:  # a cut, a wait or a question moves nothing here
+        with contextlib.suppress(ValueError, TypeError, KeyError):
+            last += [datetime.fromisoformat(seen["time"]).timestamp()] * (seen["event"] in ("started", "done", "failed", "merged"))
+    if at - (last := max(last)) <= 30 * 60:
+        return None
+    since, shown = datetime.fromtimestamp(last, timezone.utc).isoformat(timespec="minutes"), ", ".join(f"`{one}`" for one in intents)
+    return {"slug": "idle", "state": "idle", "since": since, "last_progress": last, "intents": intents,
+            "said": f"an intent is open ({shown}) and nothing has run since {since}"}
 def ring(repo, snapshot, at=None):
-    """Record each attention (>30m), no-start (>12h with newer ideas), stalled-unstarted or day-old question bell once; send nothing."""
+    """Record each attention (>30m), idle intent, stalled-unstarted or the week's day-old questions bell once; send nothing."""
     ceo, at, rung = repo / ".ceo", time.time() if at is None else at, []
     for slug, row in sorted(snapshot.items()):
         if (row["ready"] is not None and not any(row[key] for key in ("merged", "cut", "waiting", "inactive"))
@@ -229,29 +253,25 @@ def ring(repo, snapshot, at=None):
             since = datetime.fromtimestamp(row["state_time"], timezone.utc).isoformat(timespec="minutes")
             rung.append((f"attention {slug} {int(row['state_time'])}",
                          f"`{slug}` needs attention since {since}: {row['state']}"))
-    started = 0  # none counts as never
-    for seen in events(repo)[0]:
-        with contextlib.suppress(ValueError, TypeError, KeyError):
-            if seen.get("event") == "started":
-                started = max(started, datetime.fromisoformat(seen["time"]).timestamp())
-    upstream = rev(repo, "refs/remotes/origin/main")
-    main = "refs/remotes/origin/main" if upstream else "refs/heads/main"
-    idea = git("log", "-1", "--format=%H %ct", main, "--", "IDEAS.md", cwd=repo).stdout.split()
-    order = git("log", "-1", "--diff-filter=A", "--format=%ct", main, "--", "orders/*.md", cwd=repo).stdout.split()
-    if (at - started > 12 * 3600 and len(idea) == 2 and int(idea[1]) > int((order or [0])[0])
-            and not any((ceo / "waiting").glob("*.json"))):
-        rung.append((f"idle {idea[0][:12]}", "no start for 12 hours, while IDEAS.md changed after the newest order "
-                                             "and nothing waits for you"))
+    if spell := idle_spell(repo, snapshot, at):  # once, 30 minutes after its CEO was woken, or after it began
+        woken = ceo / "decisions" / identity(spell) / "stall.json"
+        if at - (woken.stat().st_mtime if woken.exists() else spell["last_progress"] + 30 * 60) > 30 * 60:
+            answer = read_json(woken.with_name("applied.json")).get("reason")
+            rung.append((f"idle {spell['last_progress']}", spell["said"] + f"; the CEO answered: {answer}" * bool(answer)))
     for slug, found, stall in unstarted(repo):
         rung.append((f"unstarted {slug} {stall.get('since')}", f"`{slug}` is eligible and not started: {found.get('reason')}"))
-    for path in waiting_rows(repo):  # a question unanswered for a day rings once a day; its row stays as it is
-        row = read_json(path)
+    old, week = [], "asked %d-W%02d" % datetime.fromtimestamp(at, timezone.utc).isocalendar()[:2]
+    for path in waiting_rows(repo):  # the questions a day old ring once a week, together; their rows stay as they are
         with contextlib.suppress(ValueError, TypeError):
-            asked = datetime.fromisoformat(row.get("time"))
-            if (days := int((at - asked.timestamp()) // 86400)) >= 1:
-                rung.append((f"asked {path.stem} {days}", f"`{path.stem}` has waited for your word since "
-                             f"{asked.isoformat(timespec='minutes')}: {row.get('question') or row.get('title')}"))
+            if at - (asked := datetime.fromisoformat((row := read_json(path)).get("time"))).timestamp() >= 86400:
+                old.append((path, row, asked))
+    for path, row, asked in old[:1]:  # the oldest, its question on one short line
+        rung.append((week, f"questions waiting a day or more for your word: {len(old)}; the oldest, `{path.stem}`, since "
+                     f"{asked.isoformat()[:16]}: {' '.join(str(row.get('question') or row.get('title')).split())[:100]}"))
     (ceo / "bells").mkdir(parents=True, exist_ok=True)
+    for bell in (ceo / "bells").glob("asked-*.json"):  # what is true now: this week's bell, while a question is old
+        if not old or bell.stem != slugify(week):
+            bell.unlink(missing_ok=True)
     for key, line in rung:
         if not (bell := ceo / "bells" / f"{slugify(key)}.json").exists():
             write_json(bell, {"key": key, "kind": key.split()[0], "line": line, "time": now()})

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The CEO kernel: run, pick, review and merge (door) orders; keep them moving (tick)."""
+"""The CEO kernel: run, review and merge (door) orders; keep them moving (tick)."""
 import sys
 sys.dont_write_bytecode = True  # never cached, as ceo.py never was
 from ceo_tick import *  # every module of the kernel, each on the one below it
-EXIT = {"done": 0, "survives": 0, "failed": 1, "fails": 1, "blocked": 2, "retry": 2, "waiting": 3}
+EXIT = {"done": 0, "survives": 0, "failed": 1, "fails": 1, "blocked": 2, "retry": 2}
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ceo.py", description="Run, review, merge orders.")
@@ -22,9 +22,8 @@ def main(argv=None):
     cmd.add_argument("--remove", action="store_true")
     sub.add_parser("init").add_argument("path", nargs="?")
     sub.add_parser("status").add_argument("--json", action="store_true")
-    cmd = sub.add_parser("pick")
-    cmd.add_argument("slug")
-    cmd.add_argument("spin", type=int)
+    # Mocks and their pick left: it is refused, saying so, whatever follows it; no prefix makes an option of it.
+    sub.add_parser("pick", add_help=False, prefix_chars="\0").add_argument("words", nargs="*")
     sub.add_parser("idea").add_argument("words", nargs="+")
     cmd = sub.add_parser("bug")
     cmd.add_argument("words", nargs="+")
@@ -57,6 +56,7 @@ def main(argv=None):
     cmd.add_argument("--from", dest="since", help="its first UTC day, YYYY-MM-DD; six days before --to by default")
     cmd.add_argument("--to", dest="until", help="its last UTC day, YYYY-MM-DD; yesterday by default")
     cmd.add_argument("paths", nargs="*", default=["."], help="a folder in each repository; this one by default")
+    cmd.add_argument("--passes", action="store_true", help="the first-review pass rate of one repository instead")
     args = parser.parse_args(argv)
     if getattr(args, "timeout", None) is not None and args.timeout <= 0:  # none: the night's window
         parser.error("--timeout must be a positive number of seconds")
@@ -74,9 +74,11 @@ def main(argv=None):
         if empty:
             parser.error(f"--{flag} is empty")
     try:
-        # Every command makes the owner's file, and run and review tell their model; but the owner's
-        # own word, an idea, a bug or an answer, is kept with nothing else read.
-        told = b"" if args.command in ("idea", "bug", "answer", "decide", "score") else owner()
+        # Every command makes the owner's file, and run and review tell their model; but the owner's own word, an idea, a bug or
+        # an answer, is kept with nothing else read, and a dream, which tells its model none, may step aside before any write.
+        told = b"" if args.command in ("idea", "bug", "answer", "decide", "score", "dream", "pick") else owner()
+        if args.command == "pick":
+            raise Refused(PICKS_LEFT)
         if args.command in ("status", "answer"):
             import desk  # the owner's surfaces, apart from the machinery that moves the work
             return desk.main(args)
@@ -106,15 +108,11 @@ def main(argv=None):
             return 0
         if args.command == "init":
             return init(args.path)
-        if args.command == "pick":
-            print(f"ceo: {pick(toplevel(), args.slug, args.spin)}.")
-            return 0
         if args.command == "board":
             import board
             return board.main(args)
         if args.command == "score":
-            import ceo_score  # nothing else loads it
-            return ceo_score.main(args)
+            return score.main(args)
         outcome = run(args, told) if args.command == "run" else inspect(args, told)
     except Refused as why:
         if args.command == "run":  # refused before its run began: a pass its order did not start

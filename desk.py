@@ -30,14 +30,12 @@ def row(repo, slug, remote):
     times = [meta.get("started"), result.get("ended"), review.get("ended"), result.get("cleared")]
     one = {"slug": slug, "order": order, "sentence": title if title[-1:] in ".!?" else f"{title}.",
            "since": max(filter(None, times), default=None)}
-    if waiting or result.get("state") == "waiting":  # a mock's spins wait for a pick, or a bug for a word
-        spins, answer = waiting.get("spins", []), read_json(ceo / "answers" / f"{slug}.json")
+    # A bug or a CEO's stop waits for a word; a row of mocks or spins, from before they left, asks nothing.
+    if choices := asked_choices(waiting):
+        answer = read_json(ceo / "answers" / f"{slug}.json")
         return {**one, "since": waiting.get("time") or one["since"], "state": "waiting",  # since it was asked
-                "question": waiting.get("question", "Which spin goes on?"),
-                "detail": waiting.get("detail", f"{len(spins)} spins wait for your pick"),
-                "answered": answer.get("choice") if answer else None,
-                "choices": asked_choices(waiting) or [{"pick": spin.get("spin"), "text": spin.get("line"),
-                                                       "preview": spin.get("preview")} for spin in spins]}
+                "question": waiting.get("question"), "detail": waiting.get("detail"),
+                "answered": answer.get("choice") if answer else None, "choices": choices}
     state, detail = situation(repo, slug, order, result, review, meta, remote)
     return {**one, "state": state, "detail": " ".join(str(detail).split()).rstrip(".")}
 
@@ -48,6 +46,8 @@ def situation(repo, slug, order, result, review, meta, remote):
     if not result:
         alive = held(repo / ".ceo" / "locks" / f"{slug}.run") or groups_alive(meta)
         return "in progress", "a worker is building it" if alive else "cut off; the next tick settles it"
+    if result.get("state") == "waiting":  # its owner's pick, of mocks or spins, from before they left the kernel
+        return "needs attention", f"{'mocks' if result.get('mocks') else 'spins'} left the kernel, so its pick is taken no more: cut it"
     if result.get("state") != "done":  # a bug's failed reproduction the owner answered is closed
         return ("finished", result["closed"]) if result.get("closed") else (
             "needs attention", result.get("reason") or "its test does not pass")
@@ -106,7 +106,7 @@ def answer(repo, slug, choice, comment=None):
     if chosen is None:
         raise Refused(f"{choice} is not a choice of {slug}, whose choices are "
                       + ", ".join(str(one["pick"]) for one in asked["choices"]))
-    if chosen.get("ask") and not (comment or "").strip():  # a comment on a night finding is its words
+    if chosen.get("ask") and not (comment or "").strip():  # an answer to a CEO is its words
         raise Refused(f"{chosen['text']} needs your words: --comment \"<text>\"")
     (answers := repo / ".ceo" / "answers").mkdir(exist_ok=True)
     write_json(answers / f"{slug}.json", {"pick": chosen["pick"], "choice": chosen["text"], "time": now(),

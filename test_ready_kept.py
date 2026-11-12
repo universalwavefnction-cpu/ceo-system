@@ -31,7 +31,7 @@ class Kept(TickCase):
             return seen[-1]
         args = SimpleNamespace(worker=self.model("build"), reviewer=None, checker=None, timeout=30, every=None)
         with patch.dict(os.environ, self.env), kernel_patch("plan_snapshot", refused_between):
-            ceo.tick_pass(self.repo, args, {}, set())
+            ceo.tick_pass(self.repo, args, {})
         self.assertEqual([path in ceo.decide_plans(one)["start"] for one in seen], [False, True])
         self.assertEqual(ceo.read_json(record), kept)  # eligible again as the pass last read it: it stays as it was
         self.assertFalse(self.run_dir(slug).exists())

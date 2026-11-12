@@ -24,7 +24,7 @@ def door_runs(repo, busy=()):
     return [(slug, result) for _, slug, verdict, result in runs if verdict.get("commit") == result.get("head") and (ceo_merge_pending(result)
                 or verdict.get("verdict") == "survives" and not result.get("attention") or result.get("merged") and result.get("ceo_merge"))
             and result.get("pr") and not result.get("cleared") and (result.get("merged") or not result.get("door_failures") or not working)
-            and not result.get("mocks") and (result.get("merged") or order_active(repo, slug, for_merge=True))]
+            and (result.get("merged") or order_active(repo, slug, for_merge=True))]
 
 def door(args):
     """Settle each eligible run's merged pull request; merge the oldest open one."""
@@ -194,8 +194,8 @@ def clear(repo, slug, result, pr, lock):
     ref, wt, here = f"refs/heads/order/{slug}", repo / ".ceo" / "wt" / slug, {"cwd": repo, "pass_fds": (lock,)}
     gone = git("push", "-q", "origin", "--delete", ref, timeout=NET, **here)
     if gone.returncode and "remote ref does not exist" not in gone.stderr: return later(result, f"its branch on origin is not deleted yet: {gone.stderr.strip()}")
-    git("worktree", "remove", "--force", "--force", str(wt), **here)
-    shutil.rmtree(wt, ignore_errors=True)
+    left = git(*CHANGES, cwd=wt, pass_fds=(lock,)) if wt.exists() else None  # work saved there since the review stays, for the owner
+    if left and (left.returncode or left.stdout.strip() or git("worktree", "remove", str(wt), **here).returncode): return later(result, "its worktree holds later work, or git will not remove it")
     git("worktree", "prune", **here)
     git("update-ref", "-d", ref, result["head"], **here)  # only while it names the reviewed commit
     note(repo, slug, cleared=now())
@@ -219,7 +219,7 @@ def joining(repo, found, row):
         order, number = found["order"], Path(found["order"]).name.split("-", 1)[0]
         new = f"orders/{number}-join-{found['head'][:7]}.md"  # one join of each head that met a conflict
         if blob(repo, base, new): return None  # filed before
-        title, block, _, _, worker, _ = parse_order(row["text"])
+        title, block, worker = parse_order(row["text"])
         fills = {"title": title, "number": number, "round": str(row["round"]), "order": order, "head": found["head"],
                  "files": ", ".join(found["conflicts"]), "worker": f"\n## Worker\n{worker}\n" if worker else "", "block": block.rstrip("\n")}
         made = re.sub(r"<([a-z]+)>", lambda m: fills.get(m[1], m[0]), blob(repo, base, "routines/join.md") or (KERNEL.parent / "routines" / "join.md").read_text(encoding="utf-8"))
@@ -235,132 +235,13 @@ def fix_moves(repo, cache=None):
         with contextlib.suppress(TypeError, ValueError):  # no time, or none with its zone, is older
             fresh = datetime.fromisoformat(review.get("ended")) >= FIX_SINCE
         if not (fresh and review.get("verdict") == "fails" and review.get("commit") == found.get("head")
-                and found.get("state") == "done" and not any(found.get(key) for key in ("merged", "mocks", "ceo_merge"))
+                and found.get("state") == "done" and not any(found.get(key) for key in ("merged", "ceo_merge"))
                 and not (ceo / "waiting" / f"{slug}.json").exists() and not (ceo / "stalls" / f"{slug}.json").exists()): continue
         orders = order_snapshot(repo, source, cache)
         family, cap = order_families(orders).get(found["order"]), settings(repo).get("round_cap", 3)
         if family and type(cap) is int and orders[found["order"]]["round"] < cap and order_active(repo, slug, source, cache=cache):
             with contextlib.suppress(Refused):  # the next pass tries again
                 record_on_main(repo, f"the fix round of {slug}", fixing(repo, found, review, orders[found["order"]]))
-
-def escaped(command):
-    """Spell BMP characters as escapes only in ordinary literals of a node/Python program: a heredoc, or an inline word."""
-    def program(opener, here, body):  # here: a heredoc, or the whole quoted word after node -e|--eval|-p|--print or python -c
-        try:
-            inline, words = here[2] is None, shlex.split(opener[:here.start()], comments=True)
-            if not inline and shlex.split(opener[here.end():], comments=True): return body  # trailing arguments can make it a script's stdin
-        except ValueError: return body
-        while words and re.fullmatch(r"[A-Za-z_]\w*=(?!\().*", words[0]): words.pop(0)  # an array is no assignment
-        if not words or not re.fullmatch(r"node|python[\d.]*", words[0]) or any(  # inline: no -, -- or flag cluster takes the word
-                not word.startswith("-") or re.match(r"-(?:[cep]|m)|--(?:eval|print)(?:=|$)" + (r"|-[^-]*[cepm]|--?$" if inline else ""), word)
-                for word in words[1:-1 if inline else None]) or inline and words[-1] not in (("-e", "--eval", "-p", "--print") if words[0] == "node" else ("-c",)):
-            return body  # a script's stdin, shell text or data: its bytes belong to the reviewer
-        if not inline and not re.search(r"['\"\\]", here[2]) and re.search(r"[$`]", body): return body  # shell expansions run first
-        comments, regex, prefix = (r"//[^\n]*|/\*.*?\*/", r"/(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\[\n])+/[a-z]*", r"(?!)") if (node := words[0] == "node") else (
-            r"\#[^\n]*", r"(?!)", r"[rRuUbBfF]+")
-        code = re.compile(r"(?P<comment>" + comments + r")|(?P<regex>" + regex + r")|(?P<prefix>" + prefix +
-                          r")?(?P<quote>(?P<triple>'''|\"\"\")|['\"])(?:\\.|(?!(?P=quote))(?(triple)[^\\]|[^\\\n]))*(?P=quote)|[\w$]+|=>|\?\.|\?\?|\s+|.", re.S)
-        template = re.compile(r"\\.|«[^»]*»|\$\{|.", re.S)
-        spell = lambda text: re.sub(r"«[^»]*»|\\.|[\x80-\uffff]", lambda char: f"\\u{ord(char[0]):04x}"
-                                    if len(char[0]) == 1 else char[0], text, flags=re.S)
-        def expression(previous, operators):
-            return previous[-1:] in (")", "]", "}", "'", '"') or bool(re.fullmatch(r"[\w$]+", previous)
-                and previous not in ("return", "throw", "case", "else", "void", "typeof", "new", "delete", "in", "instanceof", "do")
-                and not (previous == "await" and operators[0] or previous == "yield" and operators[1]))
-        def walk(at=0, in_template=False, keep=False, depth=0, operators=("--input-type=module" in words, False)):
-            out, before, previous, parens, braces, arrows, questions = [], "", "", [], [], [], []
-            header, async_paren, level, last, previous_break = None, False, 0, at, False
-            while at < len(body):
-                token = (template if in_template else code).match(body, at)
-                value, at = token[0], token.end()
-                line_break = bool(re.search(r"[\r\n\u2028\u2029]", body[last:token.start()]))
-                if not in_template and token["regex"] and expression(previous, operators):
-                    value, at = "/", token.start() + 1  # division cannot eat an interpolation's closing brace
-                if in_template:
-                    if value == "`": return "".join(out) + value, at
-                    if value == "${":
-                        inside, at = walk(at, keep=keep, depth=1, operators=operators)
-                        value += inside
-                    elif not keep: value = spell(value)
-                elif value == "`" and node:
-                    inside, at = walk(at, True, keep or expression(previous, operators), operators=operators)
-                    value, previous, last = value + inside, "]", at
-                else:
-                    # await/yield are operators in their function, but may name tags in a plain script.
-                    while arrows and level <= arrows[-1][0] and (value in (",", ";", ")", "]", "}") or
-                            value == ":" and len(questions) <= arrows[-1][2] or "\n" in body[last:token.start()] and
-                            expression(previous, operators) and (value == "{" and header is None or
-                            re.fullmatch(r"[\w$]+", value) and value not in ("in", "instanceof"))):
-                        operators = arrows.pop()[1]
-                        if value == "{": previous = ";"
-                    if value == "?": questions.append(level)
-                    statement_colon = value == ":" and level not in questions and (not braces or not braces[-1][2])
-                    if value == ":" and questions and questions[-1] == level: questions.pop()
-                    control = block = False
-                    if value == "function" and previous not in (".", "?."):
-                        async_function = previous == "async" and not line_break
-                        start = before if async_function else previous
-                        # A declaration closes a statement; a function expression still allows division.
-                        declaration = (start in (";", "{", "}", "else", "do", "export", "default") or not start and not depth
-                                       or (previous_break if async_function else line_break) and (expression(start, operators) or start in ("return", "yield")))
-                        header = (async_function, False, declaration)
-                    elif value == "*" and header is not None:
-                        header = (header[0], True, header[2])
-                    if value in ("*", "[", "#") and header is None and braces and braces[-1][2] and (
-                            previous in ("{", ",", ";", "}", "static") or previous == "async" and before in ("{", ",", ";", "}", "static")):
-                        header = (previous == "async" and not line_break, value == "*", False)
-                    if value in ("(", "["):
-                        if value == "(" and header is None and braces and braces[-1][2] and (previous == "]" or
-                                before in ("{", ",", ";", "}", "async", "get", "set") and expression(previous, (False, False))):
-                            header = (before == "async" and not previous_break, False, False)
-                        parens.append((previous in ("if", "while", "for", "with", "switch", "catch"), header, previous == "async", operators))
-                        operators = header[:2] if value == "(" and header is not None else operators
-                        header = None
-                    elif value in (")", "]"):
-                        control, header, async_paren, operators = parens.pop() if parens else (False, None, False, operators)
-                    elif value == "=>":
-                        arrows.append((level, operators, len(questions)))
-                        operators = (async_paren if previous == ")" else before == "async", False)
-                    if value == "{":
-                        block = header[2] if header is not None else previous in (";", "{", "else", "do", "try", "finally") or not previous and not depth
-                        braces.append((block, arrows.pop()[1] if previous == "=>" else operators,
-                                       not block and previous not in (")", "=>")))
-                        operators, header = header[:2] if header is not None else (False, False) if previous == ")" else operators, None
-                    elif value == "}" and braces: block, operators, _ = braces.pop()
-                    level += (value in ("(", "[", "{")) - (value in (")", "]", "}"))
-                    if depth and value in ("{", "}"):
-                        depth += 1 if value == "{" else -1
-                        if not depth: return "".join(out) + value, at
-                    if not value.isspace() and token["comment"] is None:
-                        last, previous_break = at, line_break
-                        before, previous = previous, (";" if value == ")" and control or value == "}" and block or statement_colon else
-                                                      "]" if token["regex"] and value != "/" or previous in (".", "?.") and re.fullmatch(r"[\w$]+", value) else value)
-                        if value not in ("function", "*", ")", "]", "#") and not re.fullmatch(r"[\w$]+", value) and not token["quote"]: header = None
-                    if token["quote"] and not token["prefix"] and not keep: value = spell(value)
-                out.append(value)
-            return "".join(out), at
-        return walk()[0]
-    def inline(opener, word):  # Bash removes only \\ and \" escapes from a double-quoted word without $ or `
-        if not re.fullmatch(r"'[^']*'|\"(?:\\[\\\"]|\\?[^\"\\$`])*\"", quoted := word[0]): return quoted
-        quote, body = quoted[0], quoted[1:-1] if quoted[0] == "'" else re.sub(r'\\([\\"])', r"\1", quoted[1:-1])
-        return quoted if (spelled := program(opener, word, body)) == body else quote + (spelled if quote == "'" else re.sub(r'\\(?=[\\"]|$)|"', r"\\\g<0>", spelled)) + quote
-    out, lines, tokens = [], iter(command.splitlines(keepends=True)), []  # consume every body in order, data heredocs and unterminated too
-    word = r'''(?:[^\s\\'"<>;&|()]+|\\[^\n]|'[^'\n]*'|"(?:\\[^\n]|[^"\\\n])*")+'''
-    shell = re.compile(r"<<<|<<(-)?[ \t]*(" + word + r")|#[^\n]*|" + word + r"|.")  # whole shell words first: quoted markers and comments open no heredoc
-    for opener in lines:
-        out.append(opener if "\\" in tokens else shell.sub(lambda word: inline(opener, word), opener))  # a continued line starts no command
-        if {"'", '"'} & set(tokens := [token[0] for token in shell.finditer(opener)]) or tokens.count("(") > tokens.count(")") and "=\0(" in "\0".join(tokens) or (  # open: data
-                re.search(r"\$\{[^}]*$", re.sub(r"\\.", "", re.sub(r"\\.|'[^']*'|(\"(?:\\.|[^\"\\])*\")", r"\1", "".join(one for one in tokens if one[0] != "#"))))): out.extend(lines)
-        heredocs = [token for token in shell.finditer(opener) if token[2] is not None]
-        for here in heredocs:
-            body, delimiter = [], shlex.split(here[2])[0]
-            for line in lines:
-                if (line.lstrip("\t") if here[1] else line).rstrip("\n") == delimiter:
-                    out.extend((program(opener, here, "".join(body)) if len(heredocs) == 1 else "".join(body), line))
-                    break
-                body.append(line)
-            else: out.extend(body)
-    return "".join(out)
 
 def fixing(repo, found, review, row):
     """A change for record_on_main(): the next round of found's run, its done-when each counting finding of its review
@@ -369,14 +250,14 @@ def fixing(repo, found, review, row):
         order, number, next_ = found["order"], Path(found["order"]).name.split("-", 1)[0], row["round"] + 1
         new = f"orders/{number}-round-{next_}.md"
         if blob(repo, base, new): return None  # filed before, by this or by the CEO
-        title, block, _, _, worker, _ = parse_order(row["text"])
-        counting = [{**one, "command": escaped(one["command"])} for one in review.get("findings", ()) if one.get("counts")]
+        title, block, worker = parse_order(row["text"])
+        counting = [one for one in review.get("findings", ()) if one.get("counts")]
         fills = {"title": re.sub(r": round [0-9]+, its review's findings fixed$", "", title), "number": number,
                  "round": str(next_), "order": order, "head": found["head"], "door": review.get("door", ""),
                  "findings": "\n".join(f"- {' '.join(one['claim'].split())}: `{one['command']}`" for one in counting),
                  "worker": f"\n## Worker\n{worker}\n" if worker else "", "block": block.rstrip("\n"),
-                 "checks": "\n".join(f"(\n{one['command']}\n) || {{ echo \"finding {i} of the review still holds\"; "
-                                     "exit 1; }" for i, one in enumerate(counting, 1))}
+                 "checks": "\n".join(f"bash -c {shlex.quote(one['command'])} || {{ echo \"finding {i} of the review still "
+                                     "holds\"; exit 1; }" for i, one in enumerate(counting, 1))}  # as replayed: set -e keeps its force
         routine = "routines/door-fix.md" if review.get("door") else "routines/fix.md"
         made = re.sub(r"<([a-z]+)>", lambda m: fills.get(m[1], m[0]), blob(repo, base, routine)
                       or (KERNEL.parent / routine).read_text(encoding="utf-8"))

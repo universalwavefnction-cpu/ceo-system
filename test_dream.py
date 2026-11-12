@@ -4,6 +4,7 @@ stand-in, which keeps its brief and where it ran, then cleans as its first argum
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ brief = sys.stdin.read()
 n = len([name for name in os.listdir(keep) if name.endswith(".brief")])
 open(os.path.join(keep, f"{n:02d}.brief"), "w").write(brief)
 open(os.path.join(keep, f"{n:02d}.cwd"), "w").write(os.getcwd())
-name = "LESSONS.md" if os.path.exists("LESSONS.md") else "MEMORY.md"
+name = more[1] if mode == "cut" and len(more) > 1 else "LESSONS.md" if os.path.exists("LESSONS.md") else "MEMORY.md"
 lines = open(name).readlines()
 if mode == "fail":
     sys.exit(1)
@@ -69,7 +70,8 @@ class Dream(unittest.TestCase):
         self.briefs.mkdir()
         (self.tmp / "model.py").write_text(MODEL)
         self.env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-                    "CEO_HOME": str(self.tmp / "home"), "PYTHONDONTWRITEBYTECODE": "1", "GIT_AUTHOR_NAME": "t",
+                    "CEO_HOME": str(self.tmp / "home"), "CLAUDE_CONFIG_DIR": str(self.tmp / "claude"),
+                    "PYTHONDONTWRITEBYTECODE": "1", "GIT_AUTHOR_NAME": "t",
                     "GIT_AUTHOR_EMAIL": "t@t.invalid", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.invalid"}
         self.origin, self.repo = self.tmp / "origin.git", self.tmp / "p"
         self.git(self.tmp, "init", "-q", "--bare", str(self.origin))
@@ -278,6 +280,31 @@ class Dream(unittest.TestCase):
         self.assertIn("+An edit made between passes.", self.git(notes, "show", "HEAD^"))
         self.assertEqual(self.git(notes, "log", "-1", "--format=%s", "HEAD^"), "dream: snapshot")
 
+    def test_session_logs_are_no_notes_to_the_guard_so_they_neither_dilute_a_large_cut_nor_hide_a_small_one(self):
+        _, notes = self.notebook()
+        (notes / "sessions").mkdir()
+        (notes / "sessions" / "log.md").write_text("Session transcript line.\n" * 1000)
+        code, out = self.dream(notes, "wipe")
+        self.assertEqual(code, 3, out)
+        self.assertIn("20 lines, then 1 (95 % removed)", out)
+        self.assertIn("for it removes over 30 % of the lines.", out)
+        self.assertEqual(len((notes / "sessions" / "log.md").read_text().splitlines()), 1000)
+        code, out = self.dream(notes, "fold")
+        self.assertEqual(code, 0, out)
+        self.assertIn("20 lines, then 16 (20 % removed)", out)
+        self.assertEqual(len((notes / "sessions" / "log.md").read_text().splitlines()), 1000)
+
+    def test_a_page_asked_for_under_sessions_is_counted_as_any_page_is(self):
+        (self.repo / "sessions").mkdir()
+        (self.repo / "sessions" / "log.md").write_text("".join(f"A line, {i}.\n" for i in range(20)))
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "commit", "-qm", "a page under sessions")
+        self.git(self.repo, "push", "-q", "origin", "main")
+        code, out = self.dream("sessions/log.md", "cut", 8, "sessions/log.md")
+        self.assertEqual(code, 3, out)
+        self.assertIn("sessions/log.md: 20 lines, then 12 (40 % removed)", out)
+        self.assertIn("for it removes over 30 % of the lines.", out)
+
     def test_a_folder_pass_held_or_moved_meanwhile_leaves_the_folder_and_is_a_branch_of_its_repository(self):
         _, notes = self.notebook()
         for mode, more, why in (("wipe", (), "it removes over 30 % of the lines"),
@@ -390,6 +417,80 @@ class Dream(unittest.TestCase):
         code, out = self.dream(self.tmp / "nowhere" / "LESSONS.md", "keep")
         self.assertEqual((code, out), (2, f"ceo: refused: {self.tmp / 'nowhere' / 'LESSONS.md'} is no folder of notes, "
                                           "nor a page in a git repository.\n"))
+
+    def claude(self, flag=None, setting=None, raw=None):
+        """Claude Code's two files as it leaves them, in the folder CLAUDE_CONFIG_DIR names: the server's flag as cached
+        in .claude.json (raw, its text as written, when given) and the setting in settings.json; None writes no file."""
+        home = Path(self.env.get("CLAUDE_CONFIG_DIR") or self.env["HOME"])
+        home.mkdir(parents=True, exist_ok=True)
+        if flag is not None:
+            (home / ".claude.json").write_text(raw or json.dumps({"cachedGrowthBookFeatures": {"tengu_onyx_plover": flag}}))
+        if setting is not None:
+            (home / "settings.json").write_text(json.dumps({"autoDreamEnabled": setting}))
+
+    def asides(self, notes):
+        """(exit code, whether the pass stepped aside, whether it wrote anything) of a pass of the notes."""
+        code, out = self.dream(notes, "keep")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(out.splitlines()), 1, out)
+        aside = out == "ceo: dream: Claude Code's own dreaming is on, so this pass steps aside.\n"
+        wrote = (notes / ".git").exists() or bool(list(self.briefs.iterdir())) or any(  # not even the owner's file
+            (self.tmp / "home" / name).exists() for name in ("dream", "OWNER.md"))
+        return aside, wrote
+
+    def test_a_folder_pass_steps_aside_before_any_write_while_claude_codes_own_dreaming_is_on(self):
+        _, notes = self.notebook()
+        before = {one.name: one.read_bytes() for one in notes.iterdir()}
+        for flag, setting in (({"enabled": True, "minHours": 24}, None), ({"enabled": True}, True),
+                              ({"enabled": False, "available": True}, True), ({"available": True, "enabled": True}, True)):
+            self.claude(flag, setting)
+            self.assertEqual(self.asides(notes), (True, False), (flag, setting))
+            self.assertEqual({one.name: one.read_bytes() for one in notes.iterdir()}, before)
+        self.claude({"enabled": True}, False)  # the owner's setting, off, wins over the flag
+        self.assertEqual(self.asides(notes), (False, True))
+        self.assertEqual(self.git(notes, "log", "--format=%s").splitlines()[1:], ["dream: snapshot"])
+
+    def test_a_folder_pass_runs_while_claude_codes_flag_or_setting_is_off_or_its_files_are_missing_or_unreadable(self):
+        _, notes = self.notebook()
+        cases = (({"enabled": False, "minHours": 24, "remoteEnabled": False}, True, None),  # as on the owner's accounts
+                 ({"enabled": False, "available": False}, True, None), ({"available": True}, None, None),
+                 ({"enabled": "true"}, True, None), (None, True, None), (None, None, None), ({}, None, "not json"),
+                 ({}, None, "[]"), ({}, None, '{"cachedGrowthBookFeatures": []}'),
+                 ({}, None, '{"cachedGrowthBookFeatures": {"tengu_onyx_plover": [true]}}'),
+                 ({}, None, '{"cachedGrowthBookFeatures": {"tengu_onyx_plover": "enabled"}}'))
+        for n, (flag, setting, raw) in enumerate(cases, 1):
+            shutil.rmtree(self.tmp / "claude", ignore_errors=True)
+            self.claude(flag, setting, raw)
+            self.assertEqual(self.asides(notes), (False, True), (flag, setting, raw))
+            self.assertEqual(len([one for one in self.briefs.iterdir() if one.suffix == ".brief"]), n)  # the model ran
+
+    def test_a_settings_file_that_cannot_be_read_counts_as_off_while_a_missing_one_leaves_the_setting_unset(self):
+        _, notes = self.notebook()
+        self.claude({"enabled": True})
+        self.assertEqual(self.asides(notes), (True, False))  # no settings.json: the setting is unset, the flag's enabled decides
+        settings = self.tmp / "claude" / "settings.json"
+        for n, raw in enumerate((b"\xff", b"not json", b"[]", None), 1):
+            shutil.rmtree(settings, ignore_errors=True)
+            settings.unlink(missing_ok=True)
+            settings.mkdir() if raw is None else settings.write_bytes(raw)  # None: a folder in its place, which cannot be read
+            self.assertEqual(self.asides(notes), (False, True), raw)
+            self.assertEqual(len([one for one in self.briefs.iterdir() if one.suffix == ".brief"]), n)  # the model ran
+
+    def test_claude_codes_files_are_read_in_the_home_folder_when_no_config_folder_is_named(self):
+        _, notes = self.notebook()
+        self.env.pop("CLAUDE_CONFIG_DIR")
+        self.env["HOME"] = str(self.tmp / "user")
+        self.claude({"enabled": True}, True)
+        self.assertEqual(self.asides(notes), (True, False))  # ~/.claude.json, the flag's cache, and the setting beside it
+        (self.tmp / "user" / ".claude.json").unlink()
+        self.assertEqual(self.asides(notes), (False, True))
+
+    def test_a_page_pass_never_steps_aside_for_claude_codes_dreaming(self):
+        self.claude({"enabled": True}, True)
+        code, out = self.dream("LESSONS.md", "fold")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("steps aside", out)
+        self.assertEqual(len(self.passes()), 1)
 
     def test_a_lessons_pass_landing_on_main_while_the_door_pushes_is_a_record(self):
         self.assertTrue(ceo.is_record("LESSONS.md"))

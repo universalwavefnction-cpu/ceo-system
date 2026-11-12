@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- The CEO app's one icon source; tools/app.sh makes the bundle's icons from it. Build, Judge, Merge: three
+       lights joined by a line, two done and one live, on the control room's dark glass. -->
+  <defs>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2d3c52"/>
+      <stop offset="1" stop-color="#111924"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0.55" stop-color="#0a7cf0" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#0a7cf0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#face)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#ffffff" stroke-opacity="0.12"/>
+  <rect x="262" y="494" width="500" height="36" rx="18" fill="#3e4d63"/>
+  <rect x="262" y="494" width="250" height="36" rx="18" fill="#2aa84a"/>
+  <circle cx="762" cy="512" r="150" fill="url(#glow)"/>
+  <circle cx="262" cy="512" r="84" fill="#2aa84a"/>
+  <circle cx="512" cy="512" r="84" fill="#2aa84a"/>
+  <circle cx="762" cy="512" r="84" fill="#0a7cf0"/>
+  <circle cx="762" cy="512" r="84" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="10"/>
+</svg>

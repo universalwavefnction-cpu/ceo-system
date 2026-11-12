@@ -87,9 +87,9 @@ def costs(spent, merges, start):
     return ratio(usd, dollars), ratio(tokens, grouped), str(unpriced)
 
 def lines(repos, columns, start, end, kernel):
-    """The lines ceo_score prints after its own rows: one row for each label of ROWS, a cell for each of repos and,
+    """The lines tools/score.py prints after its own rows: one row for each label of ROWS, a cell for each of repos and,
     for two or more, their total, then the kernel's share when kernel, its folder, is among two or more. columns
-    are what ceo_score measured of each of repos, then of their total when there are two or more."""
+    are what tools/score.py measured of each of repos, then of their total when there are two or more."""
     begin = datetime.combine(start, time(), timezone.utc).timestamp()
     finish, now = begin + 86400 * ((end - start).days + 1), datetime.now(timezone.utc).timestamp()
     found = [(column["bugs filed"], column["merges"], *measure(repo, begin, finish, now))

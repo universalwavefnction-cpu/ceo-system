@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The main window may be dragged by its sidebar and toolbar; the app's own feed command needs no entry here",
+  "windows": ["main"],
+  "permissions": ["core:window:allow-start-dragging"]
+}

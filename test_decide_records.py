@@ -66,7 +66,7 @@ class Generated(unittest.TestCase):
         for name, field, value in [('result.json', 'state', 'failed'), ('result.json', 'done_when_exit', 1),
                                     ('result.json', 'done_when_exit', False), ('result.json', 'head', ''),
                                     ('result.json', 'pr', 0), ('result.json', 'merged', 'b' * 40),
-                                    ('result.json', 'cleared', AT), ('result.json', 'mocks', ['choice']),
+                                    ('result.json', 'cleared', AT),
                                     ('lock.json', 'done_when', ''), ('lock.json', 'done_when', ' \n'),
                                     ('review.json', 'commit', 'b' * 40)]:
             invalid.append((f'{field}={value!r}', {**records, name: {**records[name], field: value}}))
@@ -320,7 +320,7 @@ class RealTicks(TickCase):
 
     def configure(self, mode):
         command = self.model(mode, str(self.ready), str(self.release), str(self.payload), str(self.count), str(self.captured))
-        (self.repo / 'ceo.toml').write_text('disk_floor_gb = 0\nram_floor_gb = 0\nnight = ""\nstall_minutes = 1\nceo = ' + json.dumps(command) + '\n')
+        (self.repo / 'ceo.toml').write_text('disk_floor_gb = 0\nram_floor_gb = 0\nnight = ""\ncleaner = ""\nstall_minutes = 1\nceo = ' + json.dumps(command) + '\n')
 
     def age(self):
         # Keep the order stalled: eligible since, and its records untouched since, old (whole, as the ISO time
@@ -508,10 +508,8 @@ class RealTicks(TickCase):
         self.assertFalse(waiting.exists())
 
     def test_terminal_event_preserves_nondecision_waiting_rows(self):
-        waiting, draft = self.repo / '.ceo/waiting/001-stopped.json', 'drafts/orders/005-night-x.md'
-        (self.repo / 'drafts/orders').mkdir(parents=True)
-        self.commit_order(f'../{draft}', TEXT)  # a night finding's row waits while its draft is on main
-        for extra in ({'spins': []}, {'bug': 13}, {'night': True, 'order': draft}):
+        waiting = self.repo / '.ceo/waiting/001-stopped.json'
+        for extra in ({'spins': []}, {'bug': 13}):
             with self.subTest(waiting=extra):
                 ceo.wait_on(self.repo, '001-stopped', {'order': ORDER, 'question': 'An owner choice is still needed.', **extra})
                 saved = waiting.read_bytes()

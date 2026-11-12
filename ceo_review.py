@@ -30,8 +30,6 @@ def inspect(args, told):
     """Review the run's finished commit in an isolated copy; record the answer beside the result."""
     kind, role = args.command, ROLE[args.command]
     order, raw, title, _, repo, slug, _, run_dir = prepare(args.order, args.source)
-    if parse_order(raw.decode("utf-8"))[5]:
-        raise Refused("mocks go only to the owner; no review")
     if not order_active(repo, slug, args.source):
         raise Refused("this order family is finished or has a later round")
     model = getattr(args, role) if getattr(args, role) is not None else default_worker(repo)
@@ -44,14 +42,12 @@ def inspect(args, told):
         raise Refused(f"a {kind} of this order is running")
     sign(lock)
     result, last = read_json(run_dir / "result.json"), read_json(run_dir / RECORD[kind])
-    if result.get("picked"):  # judged as its worker was told: the order, then the spin picked
-        raw += f"\nThe spin picked: {result['spins'][result['picked'] - 1]['line']}\n".encode()
     commit = result.get("state") == "done" and result.get("head")
     if not commit or not to_make(run_dir / RECORD[kind]):
         raise Refused(f"a {kind} needs a run that ended done, with no {RECORD[kind]} yet")
     # The review goes on the run's pull request: without one, it waits for the next tick.
     if origin(repo) and not result.get("pr"):
-        if not ensure_pr(repo, slug, result):
+        if not ensure_pr(repo, slug, result) and "OWNER/REPO" not in result["reason"]:  # else gh cannot name origin: no PR
             raise Refused(result["reason"])
         note(repo, slug, pr=result["pr"])
     copy, log_path = repo / ".ceo" / kind / slug, run_dir / f"{kind}.log"
@@ -82,6 +78,7 @@ def inspect(args, told):
             record["ended"] = now()
             write_json(run_dir / RECORD[kind], record)
             verdict, found = record["verdict"], sum(one["counts"] for one in record.get("findings", ()))
+            if verdict == "survives" and not result.get("pr"): note(repo, slug, attention="it survived its review, but " + no_github(origin(repo)))
             if verdict in ("fails", "blocked"):  # a verdict that holds the order up
                 event(repo, {"fails": "failed"}.get(verdict, verdict), slug, f"{title}: " + (
                     f"a fresh reviewer found {found} problem{'s' * (found != 1)} in it." if verdict == "fails"
@@ -89,12 +86,12 @@ def inspect(args, told):
 def review_brief(commit):
     return BRIEF.format(commit=commit, answer=ANSWER).encode()
 def oversized(record, raw, repo):
-    """Refuse oversized first-run code additions; tests, records, Markdown, rounds and joins do not count."""
+    """Refuse oversized first-run code additions; tests, a Cargo.lock, records, Markdown, rounds and joins do not count."""
     if re.search(r"^REPLACES:", raw.decode("utf-8").split("\n## ", 1)[0], re.M):
         return ""
     main = "refs/remotes/origin/main" if rev(repo, "refs/remotes/origin/main") else "refs/heads/main"
     numstat = git("diff", "--numstat", f"{main}...{record['commit']}", "--", ".", ":(exclude,glob)**/test_*.py",
-                  ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*",
+                  ":(exclude,glob)**/*.test.*", ":(exclude,glob)**/*.spec.*", ":(exclude,glob)**/Cargo.lock",
                   ":(exclude)orders/", ":(exclude)plans/", ":(exclude)results/", ":(exclude,glob)**/*.md", cwd=repo)
     # A binary file's row says -; a diff that cannot run counts nothing, so the run is reviewed as before.
     added = sum(int(row.split("\t")[0]) for row in numstat.stdout.splitlines() if row[:1].isdigit())
@@ -159,8 +156,7 @@ def judge(review, repo, copy, log, lock, timeout):
 def ensure_pr(repo, slug, result):
     """Publish the run's head and PR number in result, or its refusal; branch conflicts wait for a decision."""
     remote = origin(repo)
-    if (remote is None or result.get("pr") or result.get("mocks")
-            or read_json(repo / ".ceo" / "waiting" / f"{slug}.json").get("pr_handoff")
+    if (remote is None or result.get("pr") or read_json(repo / ".ceo" / "waiting" / f"{slug}.json").get("pr_handoff")
             or not order_active(repo, slug, result.get("source"))):
         return result.get("pr")
     branch, record = f"order/{slug}", json.dumps(result, indent=2)

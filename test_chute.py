@@ -202,6 +202,56 @@ class Chute(unittest.TestCase):
             self.assertEqual(self.chute(blog, folder), "", "a lesson left in the inbox is said again")
         self.assertEqual([row["slug"] for row in self.rows()], ["001-cart", "001-feed", "002-feed"])
 
+    def rejected_bug_push(self, mechanisms):
+        shop, blog, kernel = self.repository("shop"), self.repository("blog"), self.kernel()
+        origin = self.tmp / "origin.git"
+        self.git(self.tmp, "init", "-q", "--bare", "-b", "main", str(origin))
+        self.git(kernel, "remote", "add", "origin", str(origin))
+        self.git(kernel, "push", "-q", "origin", "main")
+        first = [f"the {name} restarts its work." for name in mechanisms]
+        second = [f"the {name} repeats its work after a push." for name in mechanisms]
+        self.finished(shop, "001-cart", codex_log(*("Lesson: " + line for line in first)))
+        self.chute(shop, kernel)
+        self.assertEqual(self.bugs(origin), [])
+        hook = origin / "hooks" / "pre-receive"
+        hook.write_text('#!/bin/sh\nwhile read old new ref; do\n'
+                        f'  if git cat-file -e "$new:bugs/{len(mechanisms)}.md" 2>/dev/null; then\n'
+                        '    echo chute-test-unavailable >&2\n    exit 1\n  fi\ndone\n')
+        hook.chmod(0o755)
+        self.finished(blog, "007-feed", codex_log(*("Lesson: " + line for line in second)))
+        said = self.chute(blog, kernel)
+        self.assertIn("chute-test-unavailable", said)
+        published = self.bugs(origin)
+        self.assertEqual(published, [f"bugs/{n}.md" for n in range(1, len(mechanisms))])
+        reports = {path: self.git(origin, "show", f"main:{path}") for path in published}
+        rows = self.rows()
+        self.assertEqual([(row["slug"], row["lesson"]) for row in rows],
+                         [(slug, line) for slug, lines in (("001-cart", first), ("007-feed", second)) for line in lines])
+        # Another pass during the outage and then recovery, with no new worker run or lesson.
+        self.chute(blog, kernel)
+        self.assertEqual(self.rows(), rows)
+        hook.unlink()
+        self.chute(blog, kernel)
+        self.assertEqual(self.bugs(origin), [f"bugs/{n}.md" for n in range(1, len(mechanisms) + 1)])
+        for path, report in reports.items():
+            self.assertEqual(self.git(origin, "show", f"main:{path}"), report,
+                             "retrying a failed mechanism repeated one already published")
+        for n, lessons in enumerate(zip(first, second), 1):
+            report = self.git(origin, "show", f"main:bugs/{n}.md")
+            for lesson in lessons:
+                self.assertEqual(report.count(lesson), 1, report)
+        head = self.git(origin, "rev-parse", "main")
+        self.assertEqual(self.read(blog), {"007-feed": "2026-11-08T10:00:00+00:00"})
+        self.assertEqual(self.chute(shop, kernel) + self.chute(blog, kernel), "")
+        self.assertEqual(self.rows(), rows)
+        self.assertEqual(self.git(origin, "rev-parse", "main"), head)
+
+    def test_the_chute_retries_a_rejected_bug_push_without_another_lesson(self):
+        self.rejected_bug_push(("door",))
+
+    def test_the_chute_retries_only_the_mechanism_whose_push_failed(self):
+        self.rejected_bug_push(("door", "tick"))
+
     def test_the_chute_reads_a_run_again_when_the_inbox_cannot_be_written(self):
         shop, kernel = self.repository("shop"), self.kernel()
         self.inbox.write_text('{"time": "2026-11-08T10:00:00+00:00", "proj')  # a line a crash cut short

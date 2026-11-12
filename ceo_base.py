@@ -2,6 +2,7 @@
 import argparse
 import ast
 import contextlib
+import difflib
 import fcntl
 import glob
 import hashlib
@@ -206,14 +207,16 @@ def api_blocked(repo, record):
         return day, reason[len(said):]
     return None
 def default_worker(repo=None):
-    """ceo.toml's `worker`, given repo, else claude's command while claude is on PATH, else None. A ceo.toml
-    that cannot be read refuses where it is read next, as before."""
+    """ceo.toml's `worker`, given repo, else the command of claude-auto, which picks the Claude account that
+    answers, while it is on PATH, else of plain claude, always one account, else None. A ceo.toml that cannot
+    be read refuses where it is read next, as before."""
     with contextlib.suppress(Refused):
         if repo is not None and (worker := settings(repo).get("worker")):
             return str(worker)
     # stream-json makes the worker's progress visible in the log while it runs, not only at the end.
-    claude = "claude -p --permission-mode bypassPermissions --output-format stream-json --verbose"
-    return claude if shutil.which("claude") else None
+    flags = "-p --permission-mode bypassPermissions --output-format stream-json --verbose"
+    program = next((name for name in ("claude-auto", "claude") if shutil.which(name)), None)
+    return f"{program} {flags}" if program else None
 def write_whole(path, text):
     """Write all of text or none of it, kept through a crash: a file that exists can be read."""
     tmp = path.with_name(f".{path.name}.tmp")
@@ -253,14 +256,13 @@ def event(repo, kind, slug, sentence, at=None):
     except OSError as err:  # the work and its record stand without the line
         print(f"ceo: the event was not written: {line}: {err}", file=sys.stderr, flush=True)
 
-def events(repo):
-    """The events of .ceo/events.jsonl in the order written, and how many of its lines cannot be read."""
-    path, found = repo / ".ceo" / "events.jsonl", []
+def events(repo, name="events.jsonl"):
+    """The events of .ceo/<name> in the order written, and how many of its lines cannot be read."""
+    path, found = repo / ".ceo" / name, []
     lines = [line for line in path.read_bytes().splitlines() if line.strip()] if path.exists() else []
     for line in lines:
-        with contextlib.suppress(ValueError):  # a line cut short, even inside a character, skipped alone
-            if isinstance(one := json.loads(line.decode("utf-8")), dict):
-                found.append(one)
+        with contextlib.suppress(ValueError, RecursionError):  # a line cut short, even inside a character, or nested too deep
+            if isinstance(one := json.loads(line.decode("utf-8")), dict): found.append(one)
     return found, len(lines) - len(found)
 def note(repo, slug, **fields):
     """Add fields to the run's result.json."""
@@ -335,6 +337,13 @@ def lessons_page(repo, commit):
     """LESSONS.md as commit holds it, what this project's work has taught, under its heading; b"" if none or empty."""
     text = blob(repo, commit, "LESSONS.md").strip()
     return f"# What this project's work has taught (LESSONS.md)\n\n{text}\n\n".encode(errors="surrogateescape") if text else b""
+def shelf():
+    """$CEO_HOME/SHELF.md, what several projects' work has taught, under its heading; b"" if absent or empty."""
+    text = text_of(home() / "SHELF.md").strip()
+    return f"# What several projects' work has taught ($CEO_HOME/SHELF.md)\n\n{text}\n\n".encode() if text else b""
+def text_of(path):
+    """The text of path, its line ends as written, a byte UTF-8 cannot read replaced; "" when there is no such file."""
+    return path.read_bytes().decode("utf-8", "replace") if path.is_file() else ""
 
 def settings(repo, name="ceo.toml"):
     """Parse repo/file (ceo.toml by default) as dotted keys: comments, tables, numbers, strings and booleans."""
@@ -359,6 +368,10 @@ def origin(repo):
     url = git("remote", "get-url", "origin", cwd=repo).stdout.strip()
     github = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/*$", url)
     return (url, github.group(1) if github else url) if url else None
+def no_github(remote):
+    """What origin()'s answer means for a project's orders: built and checked here, never merged."""
+    return (f"origin {remote[0]} is not on GitHub" if remote else "this project has no origin") + (
+        ": orders are built and checked here but can never merge")
 def gh(name, *args, **kw):
     """Call gh for this repository from a fresh non-repository folder, preventing checkout changes; tests stub PATH."""
     with tempfile.TemporaryDirectory() as away:

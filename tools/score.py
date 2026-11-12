@@ -1,13 +1,16 @@
 """`ceo.py score`: one week of each repository, measured the same way every time from its HEAD and its .ceo folder.
 A day is the UTC day of a commit's committer date. A merge is a first-parent commit of HEAD whose subject ends in
-` (#<pull request>)`, the door's name for it; the title before that links it to its order. Nothing is fetched."""
+` (#<pull request>)`, the door's name for it; the title before that links it to its order. Nothing is fetched.
+With --passes, one repository's first-review pass rate instead, read from its HEAD alone; the tick records last
+week's on main once a week, where main keeps results/."""
 import contextlib
 import re
 import statistics
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from ceo_tick import KERNEL, Refused, events, git, read_json
+from ceo_records import (KERNEL, Refused, blob, events, git, parse_order, read_json, record_on_main,
+                         source_orders)
 from tools import scorecard
 
 ROWS = ("merges", "changed lines", "order files", "round files", "cut files", "bugs filed", "bugs closed",
@@ -24,7 +27,7 @@ def read(repo, *args):
 
 def utc(stamp):
     """The UTC time an ISO stamp names, one without a zone read as UTC; None when it names none."""
-    with contextlib.suppress(ValueError):
+    with contextlib.suppress(ValueError, OverflowError):  # a time at the edge of the calendar is none too
         when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         return when.astimezone(timezone.utc) if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
@@ -87,6 +90,86 @@ def measure(repo, start, end):
                                         if (when := utc(read_json(row).get("time")))]
     return found
 
+def passes(repo, ref, start, end):
+    """The first-review pass rate over start..end, read from ref's history and tree alone, as its lines. A family, the
+    order files of one number, is merged on the UTC day of the oldest first-parent merge of one of its files, a subject
+    `<title> (#<n>)` that one order file is titled; it passed with no `orders/<n>-round-<k>.md`, a join being no round.
+    Not merged, a family with a .cut counts as cut on the day the oldest commit added it; any other counts nowhere."""
+    files = source_orders(repo, ref)
+    texts = {path: data.decode("utf-8", "replace") for path, data in files.items() if path.endswith(".md")}
+    number = lambda path: (found := re.match(r"orders/(\d+)-", path)) and found[1]
+    day = lambda at: datetime.fromtimestamp(int(at), timezone.utc).date()
+    titled = {}  # each order file's title, its first `# ` line, to the files that bear it
+    for path, text in texts.items():
+        title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), None)
+        titled.setdefault(title, []).append(path)
+    merged = {}
+    for row in reversed(read(repo, "log", "--first-parent", "--format=%ct %s", ref).splitlines()):  # oldest first
+        at, _, subject = row.partition(" ")
+        if (title := re.fullmatch(r"(.*) \(#\d+\)", subject)) and len(found := titled.get(title[1], ())) == 1:
+            merged.setdefault(number(found[0]), day(at))
+    cut = {}  # each family with a .cut at ref: the committer time of the oldest commit, a merge too, adding one
+    for block in read(repo, "log", ref, "--full-history", "-m", "--no-renames", "--diff-filter=A", "--name-only",
+                      "--format=%x01%ct", "--", "orders").split("\x01")[1:]:
+        at, *paths = block.splitlines()
+        for n in (number(path) for path in paths if path in files and path.endswith(".cut")):
+            cut[n] = min(int(at), cut.get(n, int(at)))
+    plans = {}  # each family's plans: every plans/*.md with a line starting `- orders/<n>-`
+    for path in filter(re.compile(r"plans/[^/]+\.md").fullmatch,
+                       read(repo, "ls-tree", "--name-only", ref, "plans/").splitlines()):
+        for n in re.findall(r"^- orders/(\d+)-", blob(repo, ref, path), re.M):
+            plans.setdefault(n, set()).add(path)
+    again = re.compile(r"orders/\d+-(?:round-\d+|join-[0-9a-f]{7})\.md")
+    total, tally = [0, 0, 0], {}  # passed, merged and cut, of all and of each (table, label)
+    for n in sorted(set(filter(None, map(number, files)))):
+        if n in merged:
+            passed = all(not re.fullmatch(rf"orders/{n}-round-\d+\.md", path) for path in files)
+            when, counts = merged[n], (passed, 1, 0)
+        elif n in cut:
+            when, counts = day(cut[n]), (0, 0, 1)
+        else:
+            continue  # open: neither merged nor cut
+        if not start <= when <= end:
+            continue
+        first = next((path for path in sorted(texts) if number(path) == n and not again.fullmatch(path)), "")
+        worker = ""  # its builder as the kernel reads the order; a bad order has the default one
+        with contextlib.suppress(Refused):
+            worker = parse_order(texts.get(first, ""))[2]
+        labels = [("builder", worker or "default"),
+                  *(("plan", plan) for plan in sorted(plans.get(n, ["no plan"]))),
+                  ("week", "%d-W%02d" % when.isocalendar()[:2])]
+        for one in [total, *(tally.setdefault(label, [0, 0, 0]) for label in labels)]:
+            one[:] = [have + more for have, more in zip(one, counts)]
+    rate = lambda passed, merges: f"{round(100 * passed / merges)} %" if merges else "–"
+    lines = [f"First-review pass, {start} to {end}: {total[0]} of {total[1]} merged families had no round file "
+             f"({rate(*total[:2])}); {total[2]} cut."]
+    for table in ("builder", "plan", "week"):
+        lines += ["", f"| {table} | first-review pass | cut |", "|---|---|---|"]
+        for label in sorted((label for kind, label in tally if kind == table), key=lambda one: (one == "no plan", one)):
+            passed, merges, cuts = tally[table, label]
+            shown = f"{rate(passed, merges)} ({passed} of {merges})" if merges else rate(passed, merges)
+            lines.append(f"| {label} | {shown} | {cuts} |")
+    return "".join(f"{line}\n" for line in lines)
+
+def weekly(repo, main):
+    """In a tick pass, last week's passes(), Monday to Sunday, recorded as results/score-<its ISO week>.md on main, as
+    record_on_main() records, when main, a ref or None, and the fresh base keep a results/ folder without that file;
+    built from the base it is recorded on. Said in one line, done or refused."""
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=today.weekday() + 7)
+    path = "results/score-%d-W%02d.md" % start.isocalendar()[:2]
+    due = lambda base: (git("cat-file", "-t", f"{base}:results", cwd=repo).stdout.strip() == "tree"
+                        and git("cat-file", "-e", f"{base}:{path}", cwd=repo).returncode != 0)
+    if not main or not due(main):
+        return
+    message = f"{path}: last week's first-review pass rate"
+    try:
+        if record_on_main(repo, "the week's score", lambda base: (
+                {path: passes(repo, base, start, start + timedelta(days=6))}, message, True) if due(base) else None):
+            print(f"ceo: {path}, last week's first-review pass rate, is on main.", flush=True)
+    except Refused as why:
+        print(f"ceo: refused: {why}.", flush=True)
+
 def pool(values):
     """One row's samples over every repository: counts summed, the days idle in each, samples put together."""
     known = [value for value in values if value is not None]
@@ -112,11 +195,16 @@ def main(args):
         raise Refused("--from and --to take a day as YYYY-MM-DD") from None
     if start > end:
         raise Refused("--from must not be after --to")
+    if args.passes and len(args.paths) > 1:
+        raise Refused("--passes reads one repository")
     repos = []
     for path in args.paths:
         if not (top := read(Path.cwd(), "-C", path, "rev-parse", "--show-toplevel").strip()):
             raise Refused(f"{path} is not a git repository")
         repos.append(Path(top).resolve())
+    if args.passes:
+        print(passes(repos[0], "HEAD", start, end), end="")
+        return 0
     columns, names = [measure(repo, start, end) for repo in repos], [repo.name for repo in repos]
     if len(repos) > 1:
         columns.append({label: pool([column.get(label) for column in columns]) for label in ROWS})

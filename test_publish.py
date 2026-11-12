@@ -11,8 +11,8 @@ from tools import publish
 
 ROOT = Path(__file__).resolve().parent
 AUTHOR = "ceo-kernel <1+owner@users.noreply.github.com>"
-PRIVATE_TESTS = ("test_ledger.py", "test_private.py", "test_replay.py", "test_scorecard.py")  # the client kits, private
-# names, and the replay tool, which public.txt does not ship
+PRIVATE_TESTS = ("test_bakeoff.py", "test_ledger.py", "test_private.py", "test_replay.py", "test_scorecard.py")  # the
+# client kits, private names, the replay tool, which public.txt does not ship, and the bake-off, which stands on it
 GATE = '''#!/usr/bin/env python3
 import json, os, subprocess, sys
 from pathlib import Path

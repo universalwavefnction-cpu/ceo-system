@@ -115,6 +115,33 @@ class Filed(TickCase):
         self.assertEqual(decision["states"]["plans/p.md", "orders/001-broken.md"],
                          "invalid: the order's '## Done when' section is missing or empty")
 
+    def test_an_order_of_mocks_or_spins_due_in_a_plan_needs_attention_and_starts_nothing(self):
+        self.write("orders/001-mocks.md", order_text("test -f built") + "\n## Mocks\n- red\n- blue\n")
+        self.write("orders/002-spins.md", order_text("test -f built") + "\n## Spins\n- red\n- blue\n")
+        self.write("plans/p.md", "# P\nat once 2\n- orders/001-mocks.md\n- orders/002-spins.md\n")
+        self.commit("a plan of a mock order and a spin order")
+        self.assertEqual(decide_plans(plan_snapshot(self.repo))["invalid"], ["orders/001-mocks.md", "orders/002-spins.md"])
+        self.assertNotIn("started the run", self.tick("--worker", self.model("build")))
+        attention = (self.repo / "STATUS.md").read_text().split("## Needs attention\n", 1)[1].split("\n## ", 1)[0]
+        for slug in ("001-mocks", "002-spins"):
+            self.assertIn(f"- `orders/{slug}.md` is filed and cannot start: {ceo.PICKS_LEFT}: mend it", attention.splitlines())
+
+    def test_an_order_that_cannot_be_read_needs_attention_while_its_prerequisite_is_unfinished(self):
+        self.write("orders/001-mocks.md", order_text("test -f built") + "\n## Mocks\n- red\n- blue\n")
+        self.write("orders/002-spins.md", order_text("test -f built") + "\n## Spins\n- red\n- blue\n")
+        self.write("orders/003-fine.md")
+        self.write("plans/p.md", "# P\nat once 2\n- orders/001-mocks.md\n- orders/002-spins.md after 001\n"
+                                 "- orders/003-fine.md after 001\n")
+        self.commit("a plan whose spin and plain orders wait for a mock order")
+        decision = decide_plans(plan_snapshot(self.repo))
+        self.assertEqual((decision["start"], decision["invalid"]), ([], ["orders/001-mocks.md", "orders/002-spins.md"]))
+        self.assertEqual(decision["states"]["plans/p.md", "orders/003-fine.md"], "waiting for 001")
+        self.assertNotIn("started the run", self.tick("--worker", self.model("build")))
+        attention = (self.repo / "STATUS.md").read_text().split("## Needs attention\n", 1)[1].split("\n## ", 1)[0]
+        for slug in ("001-mocks", "002-spins"):
+            self.assertIn(f"- `orders/{slug}.md` is filed and cannot start: {ceo.PICKS_LEFT}: mend it", attention.splitlines())
+        self.assertNotIn("003-fine", attention)
+
     def test_a_draft_or_any_file_outside_orders_never_runs_even_by_hand(self):
         for path in ("drafts/orders/001-draft.md", "orders/sub/002-deep.md"):
             self.write(path)
@@ -139,39 +166,11 @@ class Filed(TickCase):
             self.idle_tick()  # a failed login holds every start: the eligible order says why, twice
         ready = ceo.read_json(self.repo / ".ceo" / "ready" / "002-eligible.json")
         self.assertEqual(sorted(ready), ["reason", "since"], ready)  # its clock and its why, and no count
-        self.assertTrue(ready["reason"].startswith("the login of claude failed"), ready)
+        self.assertTrue(ready["reason"].startswith("the login of claude-auto failed"), ready)
         self.assertFalse((self.repo / ".ceo" / "ready" / "001-over-cap.json").exists())
         status = (self.repo / "STATUS.md").read_text()
         self.assertEqual(status.count("ROUND: 4 exceeds round_cap 3"), 1, status)
         self.assertIn("- `002-eligible` is eligible and not started: ", status.split("## Needs attention\n", 1)[1])
-
-    def test_agree_files_nothing_while_the_drafts_name_is_taken_in_orders_and_keeps_the_word_until_it_is_free(self):
-        for taken in (b"", order_text("test -f other", title="Filed before").encode()):
-            with self.subTest(taken=taken[:9]):
-                slug = "001-night-taken"
-                self.write(f"drafts/orders/{slug}.md", order_text("test -f built", title="Night draft"))
-                (self.repo / "orders").mkdir(exist_ok=True)  # the last case's file removed, git removed its folder
-                (self.repo / "orders" / f"{slug}.md").write_bytes(taken)
-                self.commit("a night draft, its name taken in orders/")
-                (self.repo / ".ceo").mkdir(exist_ok=True)
-                ceo.wait_on(self.repo, slug, {"order": f"drafts/orders/{slug}.md", "title": "Night draft",
-                                              "night": "2026-11-04", "question": "Agree?", "claim": "A finding",
-                                              "command": "test -f built", "choices": ceo.NIGHT_CHOICES})
-                self.assertEqual(self.ceo("answer", slug, "agree").returncode, 0)
-                for _ in range(2):
-                    self.assertIn(f"orders/{slug}.md is taken in orders/", self.idle_tick())
-                    self.assertEqual((self.repo / "orders" / f"{slug}.md").read_bytes(), taken)
-                    self.assertTrue((self.repo / ".ceo" / "answers" / f"{slug}.json").exists())
-                    self.assertTrue((self.repo / ".ceo" / "waiting" / f"{slug}.json").exists())
-                self.git("rm", "-q", f"orders/{slug}.md")
-                self.commit("the name freed")
-                self.assertIn(f"filed as orders/{slug}.md", self.idle_tick())
-                self.assertIn("Night draft", (self.repo / "orders" / f"{slug}.md").read_text())
-                self.assertFalse((self.repo / "drafts" / "orders" / f"{slug}.md").exists())
-                for folder in ("answers", "waiting"):
-                    self.assertFalse((self.repo / ".ceo" / folder / f"{slug}.json").exists(), folder)
-                self.git("rm", "-q", f"orders/{slug}.md")
-                self.commit("cleared for the next case")
 
     def test_an_order_whose_branch_a_run_before_left_says_why_each_pass_and_starts_no_child(self):
         slug = "001-left"
@@ -275,7 +274,7 @@ class Filed(TickCase):
         self.idle_tick()  # a failed login holds its start: the tick's own reason
         self.addCleanup(release.touch)
         before = ceo.read_json(record)
-        self.assertTrue(before["reason"].startswith("the login of claude failed"), before)
+        self.assertTrue(before["reason"].startswith("the login of claude-auto failed"), before)
         self.assertIn(f"ceo: started the run of orders/{slug}.md", self.tick("--worker", self.model("build")))
         self.assertEqual(ceo.read_json(record), before)  # a start whose run has not begun changes nothing
         release.touch()
@@ -286,7 +285,7 @@ class Filed(TickCase):
         self.assertFalse(self.run_dir(slug).exists())
         self.idle_tick()
         self.assertEqual(ceo.read_json(record)["since"], before["since"])
-        self.assertIn(f"- `{slug}` is eligible and not started: the login of claude failed",
+        self.assertIn(f"- `{slug}` is eligible and not started: the login of claude-auto failed",
                       (self.repo / "STATUS.md").read_text())
 
     def test_a_refused_childs_reason_goes_once_the_child_started_after_it_has_recorded_its_run(self):
@@ -374,7 +373,7 @@ class Filed(TickCase):
         for _ in range(2):
             self.idle_tick()
         since = ceo.read_json(record)["since"]
-        self.assertTrue(ceo.read_json(record)["reason"].startswith("the login of claude failed"))
+        self.assertTrue(ceo.read_json(record)["reason"].startswith("the login of claude-auto failed"))
         limit.touch()  # its worker meets the weekly limit, an api error: the run waits for a retry
         self.assertIn(f"ceo: started the run of orders/{slug}.md", self.tick("--worker", self.model("limit", str(limit))))
         self.wait_for(lambda: ceo.read_json(self.run_dir(slug) / "result.json").get("state") == "retry"
@@ -386,7 +385,7 @@ class Filed(TickCase):
         stall_clock(self, 1)
         self.idle_tick()  # eligible again, and held by a failed login: the first reason since its worker began
         self.assertEqual({key: value for key, value in ceo.read_json(record).items() if key != "reason"}, {"since": since})
-        self.assertTrue(ceo.read_json(record)["reason"].startswith("the login of claude failed"))
+        self.assertTrue(ceo.read_json(record)["reason"].startswith("the login of claude-auto failed"))
         self.assertNotIn(f"- `{slug}` is eligible and not started", (self.repo / "STATUS.md").read_text())
 
     def test_an_invalid_order_alone_has_no_clock_and_says_why_each_pass_until_it_is_mended(self):

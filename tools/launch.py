@@ -6,6 +6,8 @@
     ceo <name>       the same for the project called name, from any folder: the listed project of that name
                      wherever it lives ($CEO_HOME/projects.txt), else ~/dev/<name>, made when it is missing
     ceo <name> new   a new CEO conversation there
+    ceo try          one ready-made order, in ~/dev/ceo-try and a private GitHub repository, built by an agent and
+                     checked by a second until it merges, each step said as it happens; then the line undoing it all
 
 A folder whose top has no ceo.toml is set up in four steps, each a line that gets its check mark as it ends: git
 init; a private GitHub repository, made with gh as the folder's origin; the CEO's files, ceo.py init's commit,
@@ -21,16 +23,20 @@ no. Install it as a link to this file:
     ln -s <kernel>/tools/launch.py ~/.local/bin/ceo
 """
 import argparse
+import fcntl
 import json
 import math
 import os
 import random
+import re
+import shlex
 import shutil
 import statistics
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 KERNEL = Path(__file__).resolve().parent.parent / "ceo.py"  # through the link, the kernel beside this file
@@ -128,22 +134,24 @@ def named(name):
     return folder
 
 
-def agreed(folder):
-    """True when setting folder up rewrites no one's history: no repository, or one without a commit yet. A
-    repository with commits only on a y at the question, as its setup commits there and pushes to its origin; a
-    closed stdin is no."""
-    count = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=folder, capture_output=True, text=True)
-    if count.returncode:
-        return True
-    commits = count.stdout.strip()
-    sys.stderr.write(f"ceo: {folder} is a git repository with {commits} commit{'s' * (commits != '1')} and no "
-                     "ceo.toml. Make it a CEO project? Its setup commits the CEO's files there and pushes them to "
-                     "its origin. [y/N] ")
+def yes(question):
+    """True on a y or yes to question, asked on stderr; any other answer, or a closed stdin, says nothing done."""
+    sys.stderr.write(question)
     sys.stderr.flush()
     if sys.stdin.readline().strip().lower() in ("y", "yes"):
         return True
     print("ceo: nothing done.", file=sys.stderr)
     return False
+
+
+def agreed(folder):
+    """True when setting folder up rewrites no one's history: no repository, or one without a commit yet. A
+    repository with commits only on a y at the question, as its setup commits there and pushes to its origin."""
+    count = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=folder, capture_output=True, text=True)
+    commits = count.stdout.strip()
+    return bool(count.returncode) or yes(
+        f"ceo: {folder} is a git repository with {commits} commit{'s' * (commits != '1')} and no ceo.toml. Make it "
+        "a CEO project? Its setup commits the CEO's files there and pushes them to its origin. [y/N] ")
 
 
 def estimates():
@@ -372,11 +380,187 @@ def open_ceo(folder, again):
     os.execv(sys.executable, [sys.executable, str(KERNEL), "session", *["--continue"] * again])
 
 
+TRY, SLUG = Path("~/dev/ceo-try"), "001-hello"
+BOX = KERNEL.parent / "tools" / "box"
+CODEX = "codex exec --dangerously-bypass-approvals-and-sandbox -"  # HARNESSES.md's
+HELLO = """# A hello file
+
+## Goal
+HELLO.md at the top of the project, with one line greeting whoever opens it.
+
+## Done when
+```bash
+grep -qi hello HELLO.md
+```
+
+## Not asked
+Any other file.
+"""
+
+
+def claude():
+    """The kernel's default worker, as every project without a worker line gets it: claude-auto's command while it
+    is on PATH, else plain claude's; None with neither."""
+    if str(KERNEL.parent) not in sys.path:
+        sys.path.insert(0, str(KERNEL.parent))
+    from ceo_base import default_worker
+    return default_worker()
+
+
+def try_lines(agent, walled):
+    """What the try adds to its ceo.toml: agent's worker line, behind the wall only for claude, and no night."""
+    boxed, line = walled and agent == "claude", claude() if agent == "claude" else CODEX
+    worker = f"{shlex.quote(str(BOX))} {line}" if boxed else line
+    return f"worker = {json.dumps(worker)}\n" + 'isolation.box = "--setting-sources project"\n' * boxed + 'night = ""\n'
+
+
+def locked(path):
+    """True while some process holds path's flock, as the kernel's held reads it, though nothing is made."""
+    try:
+        with open(path) as file:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
+def said(*lines):
+    print(*lines, sep="\n", file=sys.stderr)
+    return 1
+
+
+def try_it():
+    """ceo try: the guards, the questions, then the try's folder and repository with the hello order filed."""
+    folder = TRY.expanduser()
+    if locked(folder / ".ceo" / "tick.lock"):
+        return said(f"ceo: a tick is running in {folder}; ceo try starts none beside it.")
+    quiet = {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True}
+    who = subprocess.run(["gh", "api", "user", "--jq", ".login"], **quiet)
+    login = who.stdout.strip() * (who.returncode == 0)
+    if not re.fullmatch(r"[\w.-]+", login):
+        return said("ceo: gh names no GitHub login: log in with gh auth login, then run ceo try.")
+    repo = f"{login}/ceo-try"
+    undo = (f"Undo it all: gh auth refresh -s delete_repo && gh repo delete {repo} --yes && "
+            f"rm -rf {shlex.quote(str(folder))}")
+    earlier = subprocess.run(["git", "-C", str(folder), "rev-parse", "-q", "--verify", "HEAD"], **quiet)
+    if (folder / ".git").exists() and earlier.returncode == 0:
+        return said(f"ceo: {folder} holds an earlier try. {undo}")
+    agent = "claude" if claude() else "codex" if shutil.which("codex") else None
+    if agent is None:
+        return said("ceo: neither claude nor codex is on PATH: install one and log in, then run ceo try.")
+    try:
+        box = subprocess.run([str(BOX), "true"], cwd=KERNEL.parent, **quiet)
+    except OSError as err:
+        box = subprocess.CompletedProcess(BOX, 125, "", f"tools/box cannot run: {err.strerror}")
+    walled = box.returncode == 0 and agent == "claude"
+    if not yes(f"ceo try makes the private GitHub repository {repo} and the folder {folder}, and files one "
+               f"ready-made order, a hello file: {agent} builds it and a second, fresh {agent} checks it, until it "
+               "merges. [y/N] "):
+        return 1
+    if not walled:
+        why = ((box.stderr.strip().splitlines() or [f"tools/box exited {box.returncode}"])[-1] if box.returncode
+               else "the wall holds only claude so far")
+        said(f"ceo: this machine has no wall for {agent} ({why}), so it could write anywhere you can.")
+        if not yes("Run the try without the wall? [y/N] "):
+            return 1
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        setup(folder, lambda event, step, took: event == "end" and print(f"✓ {STEPS[step]}", flush=True))
+        with open(folder / "ceo.toml", "a", encoding="utf-8") as conf:
+            conf.write(try_lines(agent, walled))
+        (folder / "orders" / f"{SLUG}.md").write_text(HELLO, encoding="utf-8")
+        for step in (("add", "ceo.toml", f"orders/{SLUG}.md"), ("commit", "-qm", "The try's order: a hello file"),
+                     ("push", "-q", "origin", "HEAD")):
+            run("the hello order is not filed ({}).", "git", *step, cwd=folder)
+    except (Failed, OSError) as why:
+        return said(f"ceo: {str(why).split('; run ceo')[0].rstrip('.')}.", undo)
+    except KeyboardInterrupt:  # the repository may be made already: the undo is said all the same
+        return said("ceo: stopped; what is made is kept.", undo) and 130
+    print(f"✓ the hello order filed; {agent} works on it now", flush=True)
+    code = watch(folder, repo)
+    print(undo, flush=True)
+    return code
+
+
+def record(path):
+    try:
+        found = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def took(found):
+    """Whole seconds from a record's started to its ended; None while it has not ended."""
+    if found.get("ended") and found.get("started"):
+        return int((datetime.fromisoformat(found["ended"]) - datetime.fromisoformat(found["started"])).total_seconds())
+    return None
+
+
+def watch(folder, repo):
+    """One-shot ticks two seconds apart, each in a session of its own that ends by itself, until the hello order
+    merges; each station said once, as the kernel records it. 1 on its failure or 20 minutes, 130 on Ctrl-C."""
+    ceo, tick, last, began, shown = folder / ".ceo", None, 0.0, time.monotonic(), 0
+    ceo.mkdir(exist_ok=True)
+    try:
+        with open(ceo / "try.log", "ab") as log:
+            while shown < 4:
+                if (tick is None or tick.poll() is not None) and time.monotonic() - last >= 2:
+                    last, tick = time.monotonic(), subprocess.Popen(
+                        [sys.executable, str(KERNEL), "tick"], cwd=folder, stdin=subprocess.DEVNULL, stdout=log,
+                        stderr=log, start_new_session=True)
+                try:
+                    lines = (ceo / "events.jsonl").read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    lines = []
+                seen = set()
+                for line in lines:
+                    try:
+                        one = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(one, dict) and one.get("slug") == SLUG:
+                        if one.get("event") in ("failed", "blocked", "waiting"):
+                            return said(f"ceo: {one.get('sentence')}")
+                        seen.add(one.get("event"))
+                result, review = (record(ceo / "runs" / SLUG / name) for name in ("result.json", "review.json"))
+                station = ("started" in seen and "the test fails first",
+                           "done" in seen and took(result) is not None and f"an agent built it, {took(result)} s",
+                           review.get("verdict") == "survives" and took(review) is not None
+                           and f"a second agent checked it, {took(review)} s",
+                           "merged" in seen and result.get("pr")
+                           and f"merged: https://github.com/{repo}/pull/{result['pr']}")[shown]
+                if station:
+                    print(station, flush=True)
+                    shown += 1
+                elif time.monotonic() - began > 1200:
+                    return said(f"ceo: no merge in 20 minutes; {folder / 'STATUS.md'} says where the order stands.")
+                else:
+                    time.sleep(0.5)
+        tick.wait()  # one-shot, it ends by itself; then the door's lock free: none of the try's is left
+        end = time.monotonic() + 60
+        while time.monotonic() < end and locked(ceo / "locks" / "door.lock"):
+            time.sleep(0.5)
+        return 0
+    except KeyboardInterrupt:
+        print("ceo: stopped; the tick at work ends by itself.", file=sys.stderr)
+        return 130
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="ceo", description=__doc__.split("\n\n")[0])
     parser.add_argument("words", nargs="*", metavar="[name] [new]",
                         help="a project's name, from any folder; new for a new CEO conversation")
     words = parser.parse_args(argv).words
+    if words[:1] == ["try"]:
+        if len(words) > 1:
+            parser.error("ceo try takes no other word")
+        try:
+            return try_it()
+        except KeyboardInterrupt:
+            return said("ceo: stopped.") and 130
     fresh = words[-1:] == ["new"]
     names = words[:-1] if fresh else words
     if len(names) > 1 or any("/" in name or name.startswith(".") for name in names):
@@ -412,8 +596,8 @@ def main(argv=None):
         lines.finish()
     except (Failed, KeyboardInterrupt) as why:
         lines.wipe()
-        said = str(why).replace("run ceo to", f"run {command} to")
-        print(f"ceo: {said}" if isinstance(why, Failed) else "ceo: stopped; what is done is kept.", file=sys.stderr)
+        told = str(why).replace("run ceo to", f"run {command} to")
+        print(f"ceo: {told}" if isinstance(why, Failed) else "ceo: stopped; what is done is kept.", file=sys.stderr)
         return 1 if isinstance(why, Failed) else 130
     finally:
         lines.wipe()  # a fault of any other kind gives the cursor back too

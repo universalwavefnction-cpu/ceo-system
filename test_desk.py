@@ -17,7 +17,7 @@ from test_ceo import order_text
 from test_door import DoorCase
 from test_tick import CEO
 
-SPINS = ["A dark sheet with large type", "A light sheet with small type"]
+MOCKS = ["A dark sheet with large type", "A light sheet with small type"]
 
 
 class DeskCase(DoorCase):
@@ -31,7 +31,7 @@ class DeskCase(DoorCase):
         (beta / "orders").mkdir(parents=True)
         (beta / ".gitignore").write_text(".ceo/\n")
         # Host resources and the night are outside this scene, as in TickCase.
-        (beta / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nrecheck_wait = 0\nnight = ""\n')
+        (beta / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nrecheck_wait = 0\nnight = ""\ncleaner = ""\n')
         (beta / "orders" / "060-building.md").write_text(order_text("test -f built", title="A long build"))  # filed
         for step in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-qm", "an order"]):
             subprocess.run(["git", *step], cwd=beta, env=self.env, check=True, capture_output=True)
@@ -44,21 +44,22 @@ class DeskCase(DoorCase):
         return done.stdout
 
     def waiting(self, repo, slug="061-pick"):
-        """A run of spins that waits for the owner's pick, in the files order 9's run writes."""
-        ceo, spins = repo / ".ceo", []
-        for number, line in enumerate(SPINS, 1):
-            preview = Path(".ceo", "wt", f"{slug}-spin-{number}", "preview.html")
-            (repo / preview).parent.mkdir(parents=True)
-            (repo / preview).write_text(f"<p>spin {number}</p>\n")
-            spins.append({"spin": number, "line": line, "branch": f"order/{slug}-spin-{number}",
-                          "head": "0" * 40, "preview": str(preview)})
+        """A run of mocks from before mocks left the kernel, still waiting for the owner's pick, as its run wrote it."""
+        ceo, mocks = repo / ".ceo", []
+        for number, line in enumerate(MOCKS, 1):
+            preview = Path(".ceo", "wt", slug, f"preview-{number}.html")
+            (repo / preview).parent.mkdir(parents=True, exist_ok=True)
+            (repo / preview).write_text(f"<p>mock {number}</p>\n")
+            mocks.append({"spin": number, "line": line, "branch": f"order/{slug}", "head": "0" * 40,
+                          "preview": str(preview)})
         (ceo / "runs" / slug).mkdir(parents=True)
         (ceo / "waiting").mkdir(exist_ok=True)
         record = {"order": f"orders/{slug}.md", "title": "The page of the shop"}
         (ceo / "runs" / slug / "result.json").write_text(json.dumps(
-            {**record, "state": "waiting", "spins": spins, "started": "2026-10-08T09:00:00+00:00",
-             "ended": "2026-10-08T09:30:00+00:00"}))
-        (ceo / "waiting" / f"{slug}.json").write_text(json.dumps({**record, "spins": spins}))
+            {**record, "state": "waiting", "mocks": [{**one, "finished": True} for one in mocks],
+             "started": "2026-10-08T09:00:00+00:00", "ended": "2026-10-08T09:30:00+00:00"}))
+        (ceo / "waiting" / f"{slug}.json").write_text(json.dumps(
+            {**record, "spins": mocks, "question": "Which mock do you pick?", "detail": "2 mocks wait for your pick"}))
 
     def world(self):
         """Here, one order merged and one failed then cut; in beta, one building and one waiting."""
@@ -92,15 +93,15 @@ class Desk(DeskCase):
             "050-merged": ("finished", "merged into main"),
             "051-failing": ("finished", "cut; no more work goes into it"),
             "060-building": ("in progress", "a worker is building it"),
-            "061-pick": ("waiting", "2 spins wait for your pick")})
+            "061-pick": ("needs attention", "mocks left the kernel, so its pick is taken no more: cut it")})
         self.assertEqual(rows["050-merged"]["sentence"], "A merged order.")
-        self.assertEqual([choice["text"] for choice in rows["061-pick"]["choices"]], SPINS)
+        self.assertNotIn("choices", rows["061-pick"], "an old run of mocks asks for no pick")
         told = [json.loads(line) for line in (self.repo / ".ceo" / "events.jsonl").read_text().splitlines()]
         self.assertEqual(sorted((one["event"], one["slug"]) for one in told), [
             ("cut", "051-failing"), ("done", "050-merged"), ("failed", "051-failing"),
             ("merged", "050-merged"), ("started", "050-merged"), ("started", "051-failing")])
         self.assertIn("A merged order: merged into main.", [one["sentence"] for one in told])
-        lines = ["repo · nothing running", "beta · 1 running · 1 waiting for you"]
+        lines = ["repo · nothing running", "beta · 1 running · 1 needs attention"]
         self.assertEqual([self.ceo_in(repo, "status").strip() for repo in (self.repo, beta)], lines)
         # No caller asks for the events since a time: --since is refused as any unknown flag is.
         since = self.ceo("status", "--since", told[-2]["time"])
@@ -115,7 +116,14 @@ class Desk(DeskCase):
             "073-diverges": ({"state": "done", "merged": "1" * 40}, {"verdict": "survives"},
                              {"verdict": "diverges", "suggestion": "Say what it is for."}),
             "074-survives": ({"state": "done"}, {"verdict": "survives"}, {}),
-            "075-blocked": ({"state": "blocked", "reason": "the worker ran past the clock."}, {}, {})}
+            "075-blocked": ({"state": "blocked", "reason": "the worker ran past the clock."}, {}, {}),
+            # Runs of spins from before spins left the kernel: one still waiting for its pick, one picked and merged.
+            "076-old-spins": ({"state": "waiting", "spins": [{"spin": 1, "line": "red"}, {"spin": 2, "line": "blue"}]}, {}, {}),
+            "077-old-picked": ({"state": "done", "picked": 1, "spins": [{"spin": 1}], "merged": "2" * 40},
+                               {"verdict": "survives"}, {})}
+        (self.repo / ".ceo" / "waiting").mkdir(parents=True)
+        (self.repo / ".ceo" / "waiting" / "076-old-spins.json").write_text(json.dumps(  # as its run wrote it: no question
+            {"order": "orders/076-old-spins.md", "title": "076-old-spins", "spins": cases["076-old-spins"][0]["spins"]}))
         for slug, records in cases.items():
             (self.run_dir(slug)).mkdir(parents=True)
             for name, record in zip(("result.json", "review.json", "vision.json"), records):
@@ -129,8 +137,15 @@ class Desk(DeskCase):
             "072-conflict": ("needs attention", "the door cannot merge it: it conflicts with main in a.txt"),
             "073-diverges": ("finished", "merged into main"),
             "074-survives": ("in progress", "reviewed; the door merges it next"),
-            "075-blocked": ("needs attention", "the worker ran past the clock")})
-        self.assertEqual(self.ceo_in(self.repo, "status").strip(), "repo · 1 running · 4 need attention")
+            "075-blocked": ("needs attention", "the worker ran past the clock"),
+            "076-old-spins": ("needs attention", "spins left the kernel, so its pick is taken no more: cut it"),
+            "077-old-picked": ("finished", "merged into main")})
+        self.assertEqual(self.ceo_in(self.repo, "status").strip(), "repo · 1 running · 5 need attention")
+        for args in (("answer", "076-old-spins", "1"), ("pick", "076-old-spins", "1")):  # nothing asks for its pick
+            done = self.ceo(*args)
+            self.assertEqual(done.returncode, 2, done.stdout)
+            self.assertRegex(done.stderr, r"^ceo: refused: [^\n]+\.\n$")
+        self.assertFalse((self.repo / ".ceo" / "answers").exists())
 
 
 class Edges(DeskCase):

@@ -111,6 +111,41 @@ class Origin(TickCase):
         self.assertEqual(self.git("-C", str(self.repo / result["worktree"]), "rev-parse", "HEAD^"), base)
         self.assertIn("Orders: orders run from your folder; no origin", self.status())
 
+    def survive_unmerged(self):
+        """File the order, tick through its run and review and twice more: (what the ticks said, Needs attention lines)."""
+        self.commit_order(f"{self.slug}.md")
+        if self.git("remote"):
+            self.git("push", "-q", "origin", "main")
+        work, locks = ("--worker", self.model("build"), "--reviewer", self.model("clean")), self.repo / ".ceo" / "locks"
+        said = self.tick(*work)
+        self.finished()
+        self.wait_for(lambda: not ceo.held(locks / f"{self.slug}.run"), "the run ended")
+        said += self.tick(*work)
+        self.wait_for(lambda: self.read(self.slug).get("attention") and not ceo.held(locks / f"{self.slug}.review"),
+                      "the review ended, and its attention was noted")
+        said += self.tick(*work) + self.tick(*work)  # a review that restarts every pass shows in these
+        self.assertEqual(self.read(self.slug, "review.json")["verdict"], "survives")
+        section = self.status().split("## Needs attention\n", 1)[1].split("\n\n", 1)[0]
+        return said, [line for line in section.splitlines() if line.startswith("- ")]
+
+    def test_an_origin_gh_cannot_name_is_told_once_and_its_review_starts_once(self):
+        (self.tmp / "agent" / "gh").write_text(f"#!{sys.executable}\nimport sys\nsys.exit('expected the \"[HOST/]OWNER/REPO\" "
+                                               "format, got \"%s\"' % sys.argv[sys.argv.index('-R') + 1])\n")
+        said, needs = self.survive_unmerged()
+        self.assertEqual(said.count("started the review"), 1, said)
+        self.assertEqual(len(needs), 1, needs)
+        self.assertIn(f"it survived its review, but origin {self.origin} is not on GitHub: ", needs[0])
+        self.assertIn("never merge", needs[0])
+        self.assertFalse(self.read(self.slug).get("pr"))
+
+    def test_without_origin_a_surviving_review_is_told_once_that_it_can_never_merge(self):
+        self.git("remote", "remove", "origin")
+        said, needs = self.survive_unmerged()
+        self.assertEqual(said.count("started the review"), 1, said)
+        self.assertEqual(len(needs), 1, needs)
+        self.assertIn("it survived its review, but this project has no origin: ", needs[0])
+        self.assertIn("never merge", needs[0])
+
     def test_remote_and_local_cuts_still_prevent_runs(self):
         self.publish(self.slug, "042-local-cut")
         (self.other / "orders" / f"{self.slug}.cut").touch()
@@ -208,9 +243,10 @@ class Origin(TickCase):
         self.assertEqual(json.loads((self.repo / ".ceo" / "stalls" / f"{self.slug}.json").read_text())["state"], "ready")
         self.assertIn(f"- `{self.slug}` stalled since ", self.status())
 
-    def test_a_night_draft_removed_on_origin_loses_its_row_while_the_folder_lags_and_one_not_pushed_keeps_its(self):
+    def test_every_night_row_leaves_on_the_next_pass_with_its_bells_and_each_draft_stays_pushed_or_not(self):
         (self.repo / ".ceo").mkdir(exist_ok=True)
-        for slug, where in (("001-night-removed", self.other), ("002-night-unpushed", self.repo)):
+        drafts = []
+        for slug, where in (("001-night-pushed", self.other), ("002-night-unpushed", self.repo)):
             draft = f"drafts/orders/{slug}.md"
             (where / draft).parent.mkdir(parents=True, exist_ok=True)
             (where / draft).write_text(order_text("test -f built", title="Night finding"))
@@ -221,16 +257,16 @@ class Origin(TickCase):
                 self.git("pull", "-q", "--ff-only")
             ceo.wait_on(self.repo, slug, {"order": draft, "title": "Night finding", "night": "2026-11-04",
                                           "question": "Agree?", "claim": "A finding", "command": "test -f built",
-                                          "choices": ceo.NIGHT_CHOICES})
+                                          "choices": [{"pick": "agree", "text": "agree"}]})
+            drafts.append(draft)
+        ceo.ring(self.repo, {}, ceo.time.time() + 3 * 86400)  # three days unanswered: the week's one bell rings
+        bells = self.repo / ".ceo" / "bells"
+        self.assertEqual(len(list(bells.glob("asked-*"))), 1)
         (self.repo / "code.txt").write_text("owner changes\n")  # the folder has changes: main here lags origin's
-        self.git("-C", str(self.other), "rm", "-q", "drafts/orders/001-night-removed.md")
-        self.git("-C", str(self.other), "commit", "-qm", "the night draft removed on origin")
-        self.git("-C", str(self.other), "push", "-q", "origin", "main")
-        for _ in range(3):  # the first pass fetches the removal, the next drops its row
-            self.idle_tick()
-        self.assertTrue((self.repo / "drafts/orders/001-night-removed.md").exists())
-        self.assertEqual(sorted(path.stem for path in (self.repo / ".ceo" / "waiting").glob("*.json")),
-                         ["002-night-unpushed"])  # only main here holds it, from a commit origin has not seen
+        self.idle_tick()  # the next pass: no night row waits, and no bell of one is left; each draft stays
+        self.assertEqual((list((self.repo / ".ceo" / "waiting").glob("*.json")), list(bells.glob("asked-*"))), ([], []))
+        self.assertTrue(all((self.repo / draft).is_file() for draft in drafts))
+        self.assertEqual(self.git("ls-tree", "--name-only", "refs/remotes/origin/main", drafts[0]), drafts[0])
 
 if __name__ == "__main__":
     unittest.main()

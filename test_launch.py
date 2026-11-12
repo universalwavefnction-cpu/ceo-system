@@ -7,6 +7,8 @@ import os
 import pty
 import re
 import select
+import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -16,8 +18,10 @@ import textwrap
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from ceo_base import default_worker
 from tools import launch
 
 KERNEL = Path(__file__).resolve().parent
@@ -477,6 +481,110 @@ class Launch(unittest.TestCase):
             path.write_text("not json")
             launch.learn([0.12345, 0.56789, 1.23456])
             self.assertEqual(json.loads(path.read_text()), [[0.123, 0.568, 1.235]])
+
+    def tried(self, answer="", box="exit 0", agents=("claude",), login=True, code=1):
+        """ceo try in this process: its guards and questions, with a stand-in wall and only the agents named; a try
+        that gets past them fails here at once rather than watching ticks."""
+        answers = 'fi\n[ "$1 $2" = "api user" ] && echo tester && exit 0\n'
+        (self.bin / "gh").write_text(GH.replace("fi\n", answers, 1) if login else GH)
+        for agent in ("claude", "codex"):
+            (self.bin / agent).unlink(missing_ok=True)
+            if agent in agents:
+                (self.bin / agent).write_text(AGENT)
+                (self.bin / agent).chmod(0o755)
+        (self.fake / "box").write_text(f"#!/bin/sh\n{box}\n")
+        (self.fake / "box").chmod(0o755)
+        path = os.pathsep.join([str(self.bin), os.path.dirname(shutil.which("git")), "/bin"])
+        err, out = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, {**self.env, "PATH": path}, clear=True), \
+                patch.object(launch, "BOX", self.fake / "box"), patch("sys.stdin", io.StringIO(answer)), \
+                patch("sys.stderr", err), patch("sys.stdout", out), patch.object(launch, "watch", lambda *_: 0):
+            self.assertEqual(launch.main(["try"]), code, out.getvalue() + err.getvalue())
+        return err.getvalue() + out.getvalue()
+
+    def untouched(self, folder=False):
+        self.assertEqual((self.home / "dev" / "ceo-try").exists(), folder)
+        self.assertFalse(self.ceo_home.exists())
+        self.assertEqual(self.records("gh.log"), ["api user --jq .login"])
+
+    def test_try_answered_no_or_not_at_all_makes_nothing(self):
+        for answer in ("n\n", ""):
+            said = self.tried(answer)
+            self.assertIn("repository tester/ceo-try and the folder", said)
+            self.assertTrue(said.endswith("[y/N] ceo: nothing done.\n"), said)
+            self.untouched()
+            (self.fake / "gh.log").unlink()
+
+    def test_try_refuses_before_asking_with_a_tick_held_an_earlier_try_or_no_login(self):
+        busy = self.home / "dev" / "ceo-try" / ".ceo"
+        busy.mkdir(parents=True)
+        with open(busy / "tick.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            said = self.tried("y\ny\n")
+        self.assertEqual(said, f"ceo: a tick is running in {busy.parent}; ceo try starts none beside it.\n")
+        self.assertEqual(self.records("gh.log"), [])
+        self.git("init", "-q", cwd=busy.parent)
+        self.git("commit", "-q", "--allow-empty", "-m", "an earlier try", cwd=busy.parent)
+        said = self.tried("y\ny\n")
+        self.assertRegex(said, r"^ceo: .* holds an earlier try\. Undo it all: gh auth refresh -s delete_repo && "
+                         rf"gh repo delete tester/ceo-try --yes && rm -rf {re.escape(str(busy.parent))}\n$")
+        self.untouched(folder=True)
+        said = self.tried("y\ny\n", login=False)
+        self.assertIn("log in with gh auth login", said)
+        self.assertNotIn("[y/N]", said)
+
+    def test_try_with_no_wall_for_its_agent_says_so_in_one_line_and_a_no_makes_nothing(self):
+        refused = "echo 'tools/box: true did not run: no wall here' >&2; exit 125"
+        for box, agents, why in ((refused, ("claude", "codex"), "tools/box: true did not run: no wall here"),
+                                 ("exit 0", ("codex",), "the wall holds only claude so far")):
+            said = self.tried("y\nn\n", box, agents)
+            agent = agents[0]
+            self.assertIn(f"[y/N] ceo: this machine has no wall for {agent} ({why}), so it could write anywhere "
+                          "you can.\nRun the try without the wall? [y/N] ceo: nothing done.\n", said)
+            self.untouched()
+            (self.fake / "gh.log").unlink()
+
+    def test_try_stopped_while_filing_says_the_undo_and_exits_130(self):
+        def stop(*_):
+            raise KeyboardInterrupt
+        with patch.object(launch, "setup", stop):
+            said = self.tried("y\n", code=130)
+        self.assertRegex(said, r"ceo: stopped; what is made is kept\.\nUndo it all: .*gh repo delete tester/ceo-try")
+
+    def test_try_watch_returns_only_once_its_own_tick_has_ended(self):
+        """The merge is recorded at once and the clock leaps a minute per reading: no deadline lets watch leave
+        its own tick running."""
+        folder, kernel = self.home / "watched", self.home / "tick.py"
+        runs = folder / ".ceo" / "runs" / launch.SLUG
+        runs.mkdir(parents=True)
+        times = {"started": "2026-11-11T00:00:00+00:00", "ended": "2026-11-11T00:00:01+00:00"}
+        (runs / "result.json").write_text(json.dumps({**times, "pr": 1}))
+        (runs / "review.json").write_text(json.dumps({**times, "verdict": "survives"}))
+        (folder / ".ceo" / "events.jsonl").write_text("".join(json.dumps({"slug": launch.SLUG, "event": one}) + "\n"
+                                                              for one in ("started", "done", "merged")))
+        kernel.write_text("import time\ntime.sleep(3)\nopen('.ceo/ended', 'w').close()\n")
+        clock = iter(range(0, 10 ** 6, 61))
+        out = io.StringIO()
+        with patch.object(launch, "KERNEL", kernel), patch("sys.stdout", out), \
+                patch.object(launch, "time", SimpleNamespace(monotonic=lambda: next(clock), sleep=time.sleep)):
+            self.assertEqual(launch.watch(folder, "tester/ceo-try"), 0)
+        self.assertTrue((folder / ".ceo" / "ended").exists(), "watch returned with its tick still running")
+        self.assertIn("merged: https://github.com/tester/ceo-try/pull/1", out.getvalue())
+
+    def test_try_lines_box_only_claude_and_never_run_a_night(self):
+        box, flags = shlex.quote(str(launch.BOX)), "-p --permission-mode bypassPermissions --output-format stream-json"
+        for program in ("claude", "claude-auto"):  # the kernel's own default: claude-auto's while it is installed
+            if program == "claude-auto":
+                (self.bin / program).write_text("#!/bin/sh\nexit 0\n")
+                (self.bin / program).chmod(0o755)
+            with self.subTest(program), patch.dict(os.environ, {"PATH": str(self.bin)}):
+                claude = default_worker()
+                self.assertTrue(claude.startswith(f"{program} {flags}"), claude)
+                self.assertEqual(launch.try_lines("claude", True), f"worker = {json.dumps(box + ' ' + claude)}\n"
+                                 'isolation.box = "--setting-sources project"\nnight = ""\n')
+                self.assertEqual(launch.try_lines("claude", False), f'worker = "{claude}"\nnight = ""\n')
+                for walled in (True, False):
+                    self.assertEqual(launch.try_lines("codex", walled), f'worker = "{launch.CODEX}"\nnight = ""\n')
 
 
 if __name__ == "__main__":

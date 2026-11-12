@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from ceo import claim
 from test_ceo import alive, order_text
 from test_desk import DeskCase
-from test_pick import STUB as SPIN_STUB, spin_order
 
 # Each line waits a second, then until the test has seen the one before: none is missed on a slow machine.
 STANDIN = r'''
@@ -128,9 +127,10 @@ class Agents(AgentsCase):
         run, seen = self.running("091-visible")
         self.assertEqual([row["line"] for row in seen], list(LINES))  # never a tool call or other JSON
         row = seen[-1]
-        self.assertEqual({key: row[key] for key in ("role", "order", "slug", "spin", "phase", "pid")},
+        self.assertEqual({key: row[key] for key in ("role", "order", "slug", "phase", "pid")},
                          {"role": "worker", "order": "orders/091-visible.md", "slug": "091-visible",
-                          "spin": None, "phase": "model", "pid": run.pid})
+                          "phase": "model", "pid": run.pid})
+        self.assertNotIn("spin", row)
         self.assertGreaterEqual(row["elapsed"], 2)  # three lines, a second apart at least
         self.assertEqual([one["elapsed"] for one in seen], sorted(one["elapsed"] for one in seen))
         started = datetime.fromisoformat(row["started"])
@@ -168,21 +168,6 @@ class Agents(AgentsCase):
             self.assertEqual(self.agents(), [])
         finally:
             os.close(held)
-
-    def test_a_run_of_spins_is_a_row_for_each_spin(self):
-        self.stub.write_text(SPIN_STUB)
-        self.commit_order("096-colors.md", spin_order("red", "blue"))
-        run = self.ceo_bg("run", "orders/096-colors.md", "--worker",
-                          self.model("spin", str(self.tmp / "began"), str(self.release)))
-        for number in (1, 2):
-            self.wait_for((self.tmp / f"began-096-colors-spin-{number}").exists, f"spin {number} started")
-        rows = self.until(lambda rows: [row["phase"] for row in rows] == ["model", "model"], "a row a spin")
-        self.assertEqual([(row["role"], row["order"], row["spin"], row["pid"]) for row in rows],
-                         [("worker", "orders/096-colors.md", spin, run.pid) for spin in (1, 2)])
-        self.assertRegex(rows[1]["sentence"], r"^worker on order 96 colors spin 2, \d+ s, model$")
-        self.release.touch()
-        run.communicate(timeout=120)
-        self.assertEqual((run.returncode, self.agents()), (3, []))  # waiting for the pick, nothing runs
 
     def test_each_pass_writes_running_now_under_the_free_line_and_removes_it_when_nothing_runs(self):
         status = self.repo / "STATUS.md"
@@ -288,7 +273,7 @@ class Agents(AgentsCase):
         beta = self.tmp / "beta"  # a second project, with no order to start
         (beta / "orders").mkdir(parents=True)
         (beta / ".gitignore").write_text(".ceo/\n")
-        (beta / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nnight = ""\n')
+        (beta / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nnight = ""\ncleaner = ""\n')
         for step in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-qm", "a project"]):
             subprocess.run(["git", *step], cwd=beta, env=self.env, check=True, capture_output=True)
         for repo in (self.repo, beta):

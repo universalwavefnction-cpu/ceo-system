@@ -252,7 +252,7 @@ class Families(TickCase):
                 return popen(cmd, *args, **kwargs)
             with patch.dict(os.environ, self.env), kernel_patch("healthy", return_value=False), \
                     patch.object(subprocess, "Popen", side_effect=counted):
-                ceo.tick_pass(self.repo, args, {}, set())
+                ceo.tick_pass(self.repo, args, {})
                 ceo.watch_stalls(self.repo)
             counts.append(len(calls))
             self.assertIn("orders run from origin", (self.repo / "STATUS.md").read_text())

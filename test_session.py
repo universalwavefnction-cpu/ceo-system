@@ -32,7 +32,7 @@ Work starts once the owner signs an intent: outcome, why, proof, limits, wake me
 your recommendation. Under a signed intent, file each plan yourself: move it into `plans/` and its orders into
 `orders/` and commit; filing alone starts the work. Never ask again inside its limits; outside them, ask.
 
-When the owner asks for visual mocks, draft a mock order (`## Mocks`): one worker draws all variants for the owner's pick.
+When the owner asks for visual mocks, one worker draws all variants on one pick-sheet page, outside any order.
 
 Speak to the owner in short, plain English. End each turn with what you need from them, or "nothing".
 """
@@ -136,9 +136,10 @@ class Session(unittest.TestCase):
             "args": ["wrapper argument", "--continue", "--append-system-prompt", EXPECTED],
             "input": "owner's words\n"})
 
-    def test_codex_takes_session_md_as_its_developer_instructions_and_gemini_opens_without_it(self):
+    def test_codex_takes_session_md_as_its_developer_instructions_and_gemini_as_its_first_message(self):
         # Codex has no system-prompt flag: -c reads developer_instructions as TOML, and a JSON string is one.
-        # Gemini has none at all. Named so, by any folder, each gets its own flags; claude-auto keeps claude's.
+        # Gemini has none at all: -i opens it, always new, with the prompt as its first message. Named so, by any
+        # folder, each gets its own flags; claude-auto keeps claude's.
         prompt = EXPECTED + 'A "quoted" line, a back\\slash, a\ttab and Привет.\n'
         (self.repo / "SESSION.md").write_text(prompt)
         programs = self.tmp / "programs"
@@ -147,10 +148,9 @@ class Session(unittest.TestCase):
             (programs / name).write_text(f'#!/bin/sh\nexec {shlex.join([sys.executable, str(self.stub)])} "$@"\n')
             (programs / name).chmod(0o755)
         given = ["-c", "developer_instructions=" + json.dumps(prompt, ensure_ascii=False)]
-        said = "ceo: gemini has no flag to take SESSION.md, so this session opens new and without it\n"
         for name, flags, args, error in (
                 ("codex", (), given, ""), ("codex", ("--continue",), ["resume", "--last", *given], ""),
-                ("gemini", (), [], said), ("gemini", ("--continue",), [], said),
+                ("gemini", (), ["-i", prompt], ""), ("gemini", ("--continue",), ["-i", prompt], ""),
                 ("claude-auto", ("--continue",), ["--continue", "--append-system-prompt", prompt], "")):
             with self.subTest(name=name, flags=flags):
                 self.configure(str(programs / name))

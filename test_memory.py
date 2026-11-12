@@ -45,7 +45,7 @@ class Memory(TickCase):
 
     def floors(self, floor):
         (self.repo / "ceo.toml").write_text(
-            f'disk_floor_gb = 0\nram_floor_gb = {floor}\nrecheck_wait = 0\nnight = ""\n')
+            f'disk_floor_gb = 0\nram_floor_gb = {floor}\nrecheck_wait = 0\nnight = ""\ncleaner = ""\n')
 
     def close_shares(self):
         for fd in self.fds:
@@ -78,7 +78,7 @@ class Memory(TickCase):
         other = self.tmp / "other"
         (other / "orders").mkdir(parents=True)
         (other / ".ceo").mkdir()
-        (other / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nnight = ""\n'
+        (other / "ceo.toml").write_text('disk_floor_gb = 0\nram_floor_gb = 0\nnight = ""\ncleaner = ""\n'
                                         'memory_budget_gb = 100\n')
         (other / "orders" / "001-one.md").write_text(order_text("test -f built"))
         ceo.git("init", "-q", "-b", "main", cwd=other)
@@ -121,22 +121,20 @@ class Memory(TickCase):
                               kind == "night" else "001-one"))
                 self.assertEqual(self.shares(), [1])
 
-    def test_spins_draw_one_share_each_and_mocks_draw_only_one(self):
-        for section, expected in (("Spins", 3), ("Mocks", 1)):
-            with self.subTest(section=section):
-                self.commit_order("001-one.md", order_text("test -f built") +
-                                  f"\n## {section}\n- One\n- Two\n- Three\n\n## Preview\npage.html\n")
-                self.assertIn("ceo: started the run", self.start())
-                self.assertEqual(self.shares(), [expected])
-                self.close_shares()
-        self.budget(2)
-        self.commit_order("001-one.md", order_text("test -f built") +
-                          "\n## Spins\n- One\n- Two\n- Three\n\n## Preview\npage.html\n")
-        self.assertIn("and this run needs 3", self.start())
-        self.assertEqual(len(self.spawned), 2)
+    def test_an_order_of_mocks_or_spins_draws_no_share_and_a_spent_budget_refuses_the_run(self):
+        self.assertIn("ceo: started the run", self.start())
+        self.assertEqual(self.shares(), [1])
+        self.close_shares()
+        for slug, kind in (("002-mocks", "Mocks"), ("003-spins", "Spins")):
+            self.commit_order(f"{slug}.md", order_text("test -f built") + f"\n## {kind}\n- One\n- Two\n")
+            self.assertIn("mocks and spins left the kernel", self.start(slug=slug))
+        self.assertEqual((self.shares(), len(self.spawned)), ([], 1))
+        self.budget(0)
+        self.assertIn("and this run needs 1", self.start())
+        self.assertEqual(len(self.spawned), 1)
         args = SimpleNamespace(order=str(self.repo / "orders" / "001-one.md"), source=None,
                                worker=self.args.worker)
-        with self.assertRaisesRegex(ceo.Refused, "and this run needs 3"):
+        with self.assertRaisesRegex(ceo.Refused, "and this run needs 1"):
             ceo.run(args, b"")
         self.assertFalse((self.repo / ".ceo" / "runs").exists())
 
