@@ -16,6 +16,7 @@ app/src-tauri/src/feed.rs
 app/src-tauri/src/main.rs
 app/src-tauri/tauri.conf.json
 app/ui/app.css
+app/ui/choices.css
 app/ui/index.html
 app/ui/model.js
 app/ui/package.json

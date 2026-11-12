@@ -19,8 +19,9 @@ def footprint(path, fresh=float("inf")):
             todo += here.iterdir() if stat.S_ISDIR(info.st_mode) else []
     return newest, size
 
-def sweep(repo, dry=False):
-    """Print and remove unused kernel scratch and sweep.txt paths, idle for two days; return the STATUS.md line."""
+def sweep(repo, dry=False, tight=False):
+    """Print and remove unused kernel scratch and sweep.txt paths, idle for two days; return the STATUS.md line.
+    tight (the disk is below its floor): a finished run's clean checkouts, kept on main or origin, go at once."""
     ceo, old = repo / ".ceo", time.time() - 2 * DAY
     locks, doomed, branches, swept, kept = ceo / "locks", [], [], [], []
     unshown = {path.parent for path, _ in attention_lines(repo)}
@@ -37,7 +38,8 @@ def sweep(repo, dry=False):
         trees = [wt, *(ceo / "wt" / f"{slug}-spin-{n}" for n in range(1, len(result.get("spins", ())) + 1))]
         mine = [*trees, record.parent, ceo / "review" / slug, ceo / "review" / f"{slug}.replay", ceo / "waiting" / f"{slug}.json"]
         mine.append(ceo / "ready" / f"{slug}.json")  # its readiness record too
-        if (any(footprint(path, old)[0] >= old for path in [*mine, cut]) or any(held(locks / f"{slug}.{kind}") for kind in ("run", "review"))
+        young = any(footprint(path, old)[0] >= old for path in [*mine, cut])
+        if (young and not tight or any(held(locks / f"{slug}.{kind}") for kind in ("run", "review"))
                 or groups_alive(read_json(locks / f"{slug}.json")) or held(locks / "door.lock") and not result.get("cleared")):
             continue
         dirty = [str(tree.relative_to(repo)) for tree in trees if (tree / ".git").is_file() and (
@@ -53,6 +55,9 @@ def sweep(repo, dry=False):
             f"refs/heads/order/{slug}{tail}" for tail in ("", "-cut-*", "-spin-*")), cwd=repo).stdout.splitlines()]
         heads = {rev(tree, "HEAD") for tree in trees if (tree / ".git").is_file()} | {tip for tip, _ in tips}
         if not all(on(repo, head, "refs/heads/main", "--remotes=origin") for head in heads): continue  # none goes while a head or tip it holds is on neither
+        if young:  # tight: only its checkouts, now; its records and branches keep their two days
+            doomed += [tree for tree in trees if (tree / ".git").is_file()]
+            continue
         doomed += [path for path in mine if os.path.lexists(path)]
         branches += [name for _, name in tips]
         swept.append(slug)
@@ -105,14 +110,17 @@ def sweep(repo, dry=False):
     return line
 
 def tick_pass(repo, args, children):
-    """Sweep daily, recover, take cuts and answers, push, review, merge, pull, start eligible orders and write status."""
+    """Sweep daily, and at once below the disk floor, recover, take cuts and answers, push, review, merge, pull,
+    start eligible orders and write status."""
     started = now()  # read once: the retry day and both status times come from this instant, not from a later reading
     ceo, remote = repo / ".ceo", origin(repo)
     cache = {}
     heal(repo)
-    if time.time() - footprint(ceo / "last-sweep")[0] >= DAY:
-        (ceo / "last-sweep").touch()  # first: a sweep that fails is tried again a day later
-        sweep(repo)
+    due, tight = time.time() - footprint(ceo / "last-sweep")[0] >= DAY, low_disk(repo)  # tight: before any start is refused
+    if due or tight:
+        if due:
+            (ceo / "last-sweep").touch()  # first: a sweep that fails is tried again a day later
+        sweep(repo, tight=tight)
     for slug, outcome in recover(repo, args.timeout):
         print(f"ceo: recovered {slug}: {outcome}", flush=True)
         if (found := read_json(ceo / "runs" / slug / "result.json")).get("recovered"):

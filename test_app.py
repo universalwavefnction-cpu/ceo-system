@@ -222,6 +222,44 @@ class Model(TickCase):
         self.assertEqual(shown["stages"][0]["orders"][0], dict(number="7", title="7", state=order["state"], plan=""))
         self.assertEqual((mine["percent"], mine["all"]), (16, 12))
 
+    def test_a_tick_alive_in_a_long_pass_is_online_by_a_fresh_boolean_awake_and_never_by_a_files_age(self):
+        found, gone = board.read(self.shop()), object()
+        at = datetime.now(timezone.utc).replace(microsecond=0)
+        ago = lambda minutes: (at - timedelta(minutes=minutes)).isoformat()
+        worker = dict(role="worker", slug="004-queued", started=ago(12))
+        # Each file is written just now, so its own age proves nothing. (last_tick, awake, the board's time, online):
+        cases = [(ago(1), False, ago(0), True), (ago(1), gone, ago(0), True), (ago(15), False, ago(0), True),
+                 (ago(16), False, ago(0), False), (ago(20), False, ago(0), False), (ago(20), True, ago(0), True),
+                 (ago(28), True, ago(0), True), (gone, True, ago(0), True), ("soon", True, ago(0), True),
+                 (ago(40), True, ago(15), True), (ago(40), True, ago(16), False), (ago(40), True, ago(20), False),
+                 (ago(40), True, ago(-60), False), (ago(40), True, gone, False), (ago(40), True, "noon", False),
+                 (ago(40), True, 0, False)] + [(ago(20), junk, ago(0), False)
+                                              for junk in ("true", 1, "yes", [True], {"on": True}, None)]
+        folder, wanted = self.tmp / "long", {}
+        folder.mkdir()
+        for case in cases:
+            for agents in ([], [worker]):  # a long pass with no model agent, and one with an agent on order 004
+                name = f"c{len(wanted)}"
+                tick, awake, time, _ = case
+                status = {key: value for key, value in dict(found["status"], awake=awake, agents=agents).items()
+                          if value is not gone}
+                one = {key: value for key, value in dict(found, ceo=name, last_tick=tick, time=time, status=status).items()
+                       if value is not gone}
+                (folder / f"{name}.json").write_text(json.dumps(one))
+                wanted[name] = (case, bool(agents))
+        seen = self.seen(folder, at)
+        got = {one["name"]: one for one in seen["ceos"]}
+        self.assertEqual(sorted(got), sorted(wanted))
+        for name, (case, agent) in wanted.items():
+            online, one = case[3], got[name]
+            order = next(each for each in one["orders"] if each["number"] == "004")
+            lit = online and agent  # only an online CEO's agent lights its order and lights the working lamp
+            self.assertEqual((one["online"], one["working"], one["standing"]["word"] == "Stopped",
+                              (order["status"], order["lights"])),
+                             (online, lit, not online, ("Building", ["live", "off", "off"]) if lit else ("Queued", ["off"] * 3)),
+                             (case, agent))
+        self.assertEqual(seen["totals"]["online"], sum(case[3] for case, _ in wanted.values()))
+
     def test_the_feed_is_stale_after_a_quarter_hour_without_a_pull_and_when_there_is_no_file(self):
         folder = self.tmp / "board"
         folder.mkdir()

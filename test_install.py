@@ -49,7 +49,7 @@ class Install(unittest.TestCase):
                     (cls.tools / path.name).symlink_to(path)
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()  # on macOS the default TMPDIR is a link; relpath needs the real path
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.home, self.fake = self.tmp / "stranger", self.tmp / "fake"
         (self.fake / "bin").mkdir(parents=True)

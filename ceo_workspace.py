@@ -70,6 +70,14 @@ def vendor_of(conf, model, role="the model"):
 # The capacity refusals admit() and draw() raise, each from its start: such a start waits for room, never for a CEO.
 FLOOR = re.compile(r"below the (?:disk|RAM) floor: |the \S+ quota is at \S+ %, under its floor of "
                    r"|the machine is swapping: |the machine's memory budget is spent: ")
+def low_disk(repo):
+    """Whether free disk is below ceo.toml's disk floor, as admit() reads it; False where admit() refuses the
+    floor or ceo.toml itself, a pass of its own to stop there."""
+    with contextlib.suppress(Refused):
+        floor = settings(repo).get("disk_floor_gb", 20)
+        return isinstance(floor, (int, float)) and shutil.disk_usage(repo).free / GB < floor
+    return False
+
 def admit(repo, model):
     """Refuse before anything starts while free disk or RAM is below its floor in ceo.toml, or the quota
     of the model's vendor (vendor_of's), as `quota_cmd.<vendor>` prints it, is

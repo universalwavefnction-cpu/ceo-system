@@ -3,6 +3,14 @@
 // `ceo.py board --name` writes them) and returns all the view draws. Missing data is never shown green.
 
 export const QUIET = 15 * 60 * 1000;  // a tick, or a pull, older than this is a stop (board.py QUIET)
+// The owner's two lines for a standing: hours with nothing moved before a CEO is slow, and decisions owed before it waits.
+export const RULES = {quietHours: 24, owedAtLeast: 1};
+// The owner's choices, as one JSON shape: what a card shows, its size, his two lines and the look. Every key and default.
+export const DEFAULTS = {card: {dial: true, owed: true, reason: true, last: true, flight: true}, size: "regular",
+  rules: {...RULES}, look: {theme: "system", accent: "blue"}};
+export const CHOICES = {size: ["compact", "regular", "large"], theme: ["system", "light", "dark"],
+  accent: ["blue", "lilac", "sage", "amber", "graphite"]};
+export const RANGES = {quietHours: [1, 336], owedAtLeast: [1, 99]};
 const MINUTE = 60 * 1000, HOUR = 60 * MINUTE, DAY = 24 * HOUR;
 // A live agent's lights and word, by its role (ceo_agents.logs_of); any other lock lights no order.
 const LIVE = {worker: ["live", "off", "off"], reviewer: ["done", "live", "off"], door: ["done", "done", "live"]};
@@ -13,6 +21,14 @@ const RANK = ["Building", "Judging", "Merging", "Built", "Needs you", "Parked", 
   "Unknown", "Picked", "Merged", "Cut"];
 const MARK = {Building: "live", Judging: "live", Merging: "live", Built: "built", "Needs you": "needs",
   Parked: "stuck", Stuck: "stuck", Failed: "stuck", Picked: "picked", Merged: "merged", Cut: "cut"};
+
+// A dial's marks, by an order's mark in the wave and by a row's state on a map; any other is still to go.
+const WAVE_DIAL = {merged: "landed", live: "flight", built: "flight", needs: "pick", stuck: "held"};
+const MAP_DIAL = {landed: "landed", "in review": "flight", building: "flight", held: "held"};
+const MARKS = ["landed", "flight", "pick", "held", "togo"];
+const ranked = marks => MARKS.flatMap(mark => marks.filter(one => one === mark));
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const latest = (stamps, pick = Math.max) => (stamps.some(at => at !== null) ? pick(...stamps.filter(at => at !== null)) : null);
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -122,7 +138,8 @@ const STAGE_STATES = ["done", "running", "ahead"];
 const known = (state, words) => (words.includes(state) ? state : "unknown");
 
 // A CEO's map: the share of the orders its open intents need that have landed, and every order by stage. Null when the
-// file has no maps, no open intent, or no order left to land (a cut order is no need). Landed is state "landed" alone.
+// file has no maps, no open intent, or no stage; with no order left to land (a cut order is no need) its share is null.
+// Landed is state "landed" alone.
 function mapOf(maps) {
   const intents = list(maps).filter(intent => object(intent) && intent.open === true).map(intent => ({
     title: text(intent.title) || text(intent.intent),
@@ -130,16 +147,27 @@ function mapOf(maps) {
       state: known(stage.state, STAGE_STATES), orders: list(stage.orders).filter(object).map(row => ({
         number: text(row.number), title: text(row.title) || text(row.number), state: known(row.state, ORDER_STATES),
         plan: text(row.plan)}))}))}));
+  // Every stage of every open intent is numbered from 1, and one is current: the first running, else the first ahead,
+  // else the last. The dial counts that same stage, and the room marks it.
+  const stages = intents.flatMap(intent => intent.stages);
+  stages.forEach((stage, at) => Object.assign(stage, {no: at + 1, current: false}));
+  const current = stages.find(stage => stage.state === "running") || stages.find(stage => stage.state === "ahead")
+    || stages[stages.length - 1];
+  if (current) current.current = true;
   const need = intents.flatMap(intent => intent.stages.flatMap(stage => stage.orders)).filter(row => row.state !== "cut");
   const landed = need.filter(row => row.state === "landed").length;
-  return need.length ? {percent: Math.floor(100 * landed / need.length), landed, all: need.length, intents} : null;
+  return stages.length ? {percent: need.length ? Math.floor(100 * landed / need.length) : null, landed, all: need.length,
+    intents} : null;
 }
 
 // One CEO from its status file alone, at now.
-function ceo(one, file, now) {
+function ceo(one, file, now, rules) {
   const rows = new Map(list(one.status.rows).filter(object).map(row => [row.slug, row]));
-  const tick = utc(one.last_tick);
-  const online = tick !== null && now - tick <= QUIET;
+  const tick = utc(one.last_tick), stamped = utc(one.time);
+  // A long pass leaves last_tick old, but a Mac tick that holds the machine awake says so (ceo_tick.awake: true, never
+  // merely truthy), and the board's own time, never the file's age, says it said so within QUIET of now.
+  const awake = one.status.awake === true && stamped !== null && Math.abs(now - stamped) <= QUIET;
+  const online = (tick !== null && now - tick <= QUIET) || awake;
   const agents = list(one.status.agents);
   const live = new Map();  // an online CEO's agents on an order's slug, the furthest on of each slug
   for (const agent of online ? agents.filter(object) : []) {
@@ -156,17 +184,54 @@ function ceo(one, file, now) {
     return {number: text(order.number), title: text(order.title) || text(order.number) || text(latest),
       round: order.round, latest, kind: placed(order, row), lights: lights(order, agent && agent.role, online),
       status: said, mark: MARK[said] || "queued", question: said === "Needs you" ? text(row.question) : "",
-      since};
+      since, merged_at: utc(order.merged_at)};
   });
   orders.sort((a, b) => rank(a.status) - rank(b.status) || (Number(b.number) || 0) - (Number(a.number) || 0));
   const counting = words => orders.filter(order => words.includes(order.status)).length;
-  return {name: one.ceo, file, host: text(one.host), tick, online, working: online && agents.length > 0,
-    doing: online ? agents.filter(object).map(agent => doing(agent, now)) : [],
-    plans: list(one.wave.plans).filter(object).map(plan => ({title: text(plan.title), filed: utc(plan.filed)})),
-    orders, bad: list(one.unreadable).length, map: mapOf(one.maps),
+  const plans = list(one.wave.plans).filter(object).map(plan => ({title: text(plan.title), filed: utc(plan.filed)}));
+  const map = mapOf(one.maps), all = list(one.status.rows).filter(object);
+  const owed = all.filter(row => row.state === "waiting"), last = latest(orders.map(order => order.merged_at));
+  const desk = {owed: owed.length, asked: owed.map(row => ({slug: text(row.slug), question: text(row.question),
+      since: utc(row.since)})), oldest: latest(owed.map(row => utc(row.since)), Math.min),
+    moved: latest([...all.map(row => utc(row.since)), ...orders.map(order => order.merged_at),
+      ...(online ? agents.filter(object).map(agent => utc(agent.started)) : [])]),
+    held: orders.filter(order => order.mark === "stuck").length,
+    dial: dialOf(map, orders, plans),
+    last: last === null ? null : {title: orders.find(order => order.merged_at === last).title, at: last},
+    flight: orders.filter(order => order.mark === "live" || order.mark === "built")
+      .map(({number, title, status}) => ({number, title, status}))};
+  const made = {name: one.ceo, file, host: text(one.host), tick, online, working: online && agents.length > 0,
+    doing: online ? agents.filter(object).map(agent => doing(agent, now)) : [], plans, orders, desk,
+    bad: list(one.unreadable).length, map,
     counts: {orders: orders.length, merged: orders.filter(order => order.kind === "merged").length,
       needs: orders.filter(order => order.kind === "need-you").length, building: counting(["Building"]),
       judging: counting(["Judging", "Merging"]), stuck: counting(["Stuck"]), cut: counting(["Cut"])}};
+  return {...made, standing: standing(made, rules, now)};
+}
+
+// A CEO's dial: with a map, every order not cut of its current stage (mapOf marks it); without one, every wave order
+// not cut. Landed first, still to go last.
+function dialOf(map, orders, plans) {
+  if (map === null) {
+    return {label: "Wave", marks: ranked(orders.filter(order => order.mark !== "cut").map(order => WAVE_DIAL[order.mark] || "togo")),
+      line: plans.length ? `Wave · ${plans[0].title}${plans.length > 1 ? ` and ${plans.length - 1} more` : ""}` : "No filed plan, so no wave"};
+  }
+  const stages = map.intents.flatMap(intent => intent.stages), at = stages.find(stage => stage.current);
+  return {label: `Stage ${at.no}`, line: `Stage ${at.no} of ${stages.length} · ${at.title}`,
+    marks: ranked(at.orders.filter(row => row.state !== "cut").map(row => MAP_DIAL[row.state] || "togo"))};
+}
+
+// A CEO's standing, the first that holds: its colour, its word and why. Every place that shows a standing reads this.
+export function standing(one, rules, now) {
+  const {owed, held, moved} = one.desk;
+  if (!one.online) return {colour: "red", word: "Stopped", why: one.tick === null ? "it has never run" : `no pass since ${day(one.tick)}`};
+  if (held) return {colour: "red", word: "A check failed", why: `${plural(held, "order")} held`};
+  if (owed >= rules.owedAtLeast) return {colour: "yellow", word: "Waiting on you", why: plural(owed, "decision")};
+  if (moved === null) return {colour: "yellow", word: "Slow", why: "nothing has moved yet"};
+  const quiet = Math.floor((now - moved) / HOUR);
+  if (now - moved >= rules.quietHours * HOUR) return {colour: "yellow", word: "Slow", why: `nothing moved for ${quiet}h`};
+  return {colour: "green", word: "Moving",
+    why: owed ? `${plural(owed, "decision")}, under your line of ${rules.owedAtLeast}` : "nothing needs you"};
 }
 
 function rank(word) {
@@ -175,7 +240,7 @@ function rank(word) {
 }
 
 // Everything the page shows, from feed (feed.rs's JSON, parsed) at now, in milliseconds.
-export function model(feed, now) {
+export function model(feed, now, rules = RULES) {
   const files = object(feed) ? list(feed.files).filter(object) : [];
   const ceos = [], unreadable = [], taken = new Set();
   for (const [at, found] of files.map(parsed).entries()) {
@@ -185,7 +250,7 @@ export function model(feed, now) {
     else if (taken.has(name)) unreadable.push({...found, why: `a second file of ${name}, and a CEO has one file`});
     else {
       taken.add(name);
-      ceos.push(ceo(found.one, files[at].name, now));
+      ceos.push(ceo(found.one, files[at].name, now, rules));
     }
   }
   ceos.sort((a, b) => Number(b.online) - Number(a.online));  // offline sinks to the bottom, else by file name
@@ -196,5 +261,20 @@ export function model(feed, now) {
     feed: {at: newest, stale: newest === null || now - newest > QUIET}, ceos, unreadable,
     totals: {online: ceos.filter(one => one.online).length, of: ceos.length + unreadable.length,
       working: ceos.filter(one => one.working).length, merged: sum("merged"), orders: sum("orders"),
-      needs: sum("needs"), building: sum("building"), judging: sum("judging"), stuck: sum("stuck"), cut: sum("cut")}};
+      needs: sum("needs"), owed: ceos.reduce((total, one) => total + one.desk.owed, 0), building: sum("building"), judging: sum("judging"), stuck: sum("stuck"), cut: sum("cut")}};
+}
+
+// The whole shape of the owner's choices from anything kept: nothing or nonsense gives DEFAULTS, a wrong part takes its
+// default, and a number is rounded and, out of its range, takes the nearest end.
+export function settings(raw) {
+  const part = key => (object(raw) && object(raw[key]) ? raw[key] : {});
+  const card = part("card"), rules = part("rules"), look = part("look");
+  const one = (value, key, fallback) => (CHOICES[key].includes(value) ? value : fallback);
+  const number = (value, [low, high], fallback) => (typeof value === "number" && Number.isFinite(value)
+    ? Math.min(high, Math.max(low, Math.round(value))) : fallback);
+  return {card: Object.fromEntries(Object.entries(DEFAULTS.card).map(([key, on]) =>
+      [key, typeof card[key] === "boolean" ? card[key] : on])),
+    size: one(object(raw) ? raw.size : null, "size", DEFAULTS.size),
+    rules: Object.fromEntries(Object.entries(RANGES).map(([key, range]) => [key, number(rules[key], range, DEFAULTS.rules[key])])),
+    look: {theme: one(look.theme, "theme", DEFAULTS.look.theme), accent: one(look.accent, "accent", DEFAULTS.look.accent)}};
 }
